@@ -1,0 +1,99 @@
+---
+name: internal-sync
+
+"on":
+  schedule:
+    - cron: "30 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: gh-actions-glab-internal
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      has_targets: ${{ steps.plan.outputs.has_targets }}
+      should_run: ${{ steps.plan.outputs.should_run }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      actionable_count: ${{ steps.plan.outputs.actionable_count }}
+      error_count: ${{ steps.plan.outputs.error_count }}
+    steps:
+      - name: Checkout repository
+        # actions/checkout v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Setup Python
+        # actions/setup-python v6.1.0
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548
+        with:
+          python-version: "3.13"
+
+      - name: Fetch planning secrets from BWS
+        uses: ./.github/actions/bws-fetch
+        with:
+          access-token: ${{ secrets.BWS_ACCESS_TOKEN }}
+          project-id: ${{ secrets.BWS_PROJECT_ID }}
+          bws-version: ${{ vars.BWS_VERSION }}
+          bws-sha256: ${{ vars.BWS_SHA256 }}
+          secrets: >-
+            GL_BASE_URL,
+            GL_PAT_FORK_GLAB_SVC,
+            GL_BRIDGE_FORK_USER_GLAB,
+            GL_FORKS_INT_JSON,
+            GIT_BRANCH_PREFIX,
+            GIT_BRANCH_MAIN,
+            GIT_BRANCH_STAGING,
+            GIT_BRANCH_RELEASE,
+            GIT_BRANCH_SNAPSHOT
+          allow-empty-secrets: GL_FORKS_INT_JSON
+          output-dir: .secrets
+
+      - name: Plan internal targets
+        id: plan
+        shell: bash
+        env:
+          SYNC_MODE: internal
+          OUTPUT_PATH: plan.json
+          SUMMARY_PATH: plan.md
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/plan_sync.py
+
+      - name: Publish plan summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat plan.md >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Cleanup secrets
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .secrets
+
+  reconcile:
+    name: reconcile-${{ matrix.target_project_path }}
+    needs: plan
+    if: needs.plan.outputs.should_run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.matrix) }}
+    uses: ./.github/workflows/reconcile-target.yml
+    with:
+      mode: internal
+      target-id: ${{ matrix.target_id }}
+      target-project-path: ${{ matrix.target_project_path }}
+      target-json: ${{ matrix.target_json }}
+    secrets:
+      BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+      BWS_PROJECT_ID: ${{ secrets.BWS_PROJECT_ID }}

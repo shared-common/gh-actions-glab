@@ -1,0 +1,102 @@
+---
+name: reconcile-target
+
+"on":
+  workflow_call:
+    inputs:
+      mode:
+        required: true
+        type: string
+      target-id:
+        required: true
+        type: string
+      target-project-path:
+        required: true
+        type: string
+      target-json:
+        required: true
+        type: string
+    secrets:
+      BWS_ACCESS_TOKEN:
+        required: true
+      BWS_PROJECT_ID:
+        required: true
+
+permissions: {}
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    concurrency:
+      group: reconcile-${{ inputs.target-id }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        # actions/checkout v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Setup Python
+        # actions/setup-python v6.1.0
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548
+        with:
+          python-version: "3.13"
+
+      - name: Resolve BWS secret list
+        id: secret_list
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          case "${MODE}" in
+            external)
+              client_secrets="GL_PAT_FORK_SEEDBED_SVC,GL_BRIDGE_FORK_USER_SEEDBED"
+              ;;
+            internal)
+              client_secrets="GL_PAT_FORK_GLAB_SVC,GL_BRIDGE_FORK_USER_GLAB"
+              ;;
+            *)
+              printf '%s\n' "Unsupported mode: ${MODE}" >&2
+              exit 1
+              ;;
+          esac
+          printf 'secrets=%s\n' \
+            "GL_BASE_URL,${client_secrets},GIT_BRANCH_PREFIX,GIT_BRANCH_MAIN,GIT_BRANCH_STAGING,GIT_BRANCH_RELEASE,GIT_BRANCH_SNAPSHOT" \
+            >> "${GITHUB_OUTPUT}"
+
+      - name: Fetch reconcile secrets from BWS
+        uses: ./.github/actions/bws-fetch
+        with:
+          access-token: ${{ secrets.BWS_ACCESS_TOKEN }}
+          project-id: ${{ secrets.BWS_PROJECT_ID }}
+          bws-version: ${{ vars.BWS_VERSION }}
+          bws-sha256: ${{ vars.BWS_SHA256 }}
+          secrets: ${{ steps.secret_list.outputs.secrets }}
+          output-dir: .secrets
+
+      - name: Reconcile target project
+        shell: bash
+        env:
+          TARGET_JSON: ${{ inputs.target-json }}
+          OUTPUT_PATH: reconcile.json
+          SUMMARY_PATH: reconcile.md
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/reconcile_target.py
+
+      - name: Publish reconcile summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat reconcile.md >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Cleanup secrets
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .secrets

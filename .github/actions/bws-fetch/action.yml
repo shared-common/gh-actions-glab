@@ -1,0 +1,165 @@
+---
+name: "bws-fetch"
+description: "Thin wrapper over gh-actions-shared bws-fetch with optional empty-secret support."
+inputs:
+  project-id:
+    required: true
+    description: "BWS project id"
+  access-token:
+    required: true
+    description: "BWS access token"
+  secrets:
+    required: true
+    description: "Comma-separated secret names"
+  bws-version:
+    required: true
+    description: "BWS CLI version"
+  bws-sha256:
+    required: true
+    description: "BWS CLI archive sha256"
+  output-dir:
+    required: false
+    default: "bws"
+    description: "Directory where secret files are written"
+  allow-empty-secrets:
+    required: false
+    default: ""
+    description: "Comma-separated secret names that may resolve to empty values"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Split required and optional secret names
+      id: split
+      shell: bash
+      env:
+        SECRETS: ${{ inputs.secrets }}
+        ALLOW_EMPTY_SECRETS: ${{ inputs.allow-empty-secrets }}
+      run: |
+        set -euo pipefail
+        python3 "${{ github.action_path }}/split_secrets.py"
+
+    - name: Fetch required secrets from shared action
+      if: ${{ steps.split.outputs.required-secrets != '' }}
+      # shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
+      uses: shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
+      with:
+        access-token: ${{ inputs.access-token }}
+        project-id: ${{ inputs.project-id }}
+        bws-version: ${{ inputs.bws-version }}
+        bws-sha256: ${{ inputs.bws-sha256 }}
+        secrets: ${{ steps.split.outputs.required-secrets }}
+        output-dir: ${{ inputs.output-dir }}
+
+    - name: Fetch optional empty-allowed secrets
+      if: ${{ steps.split.outputs.optional-secrets != '' }}
+      shell: bash
+      env:
+        BWS_PROJECT_ID: ${{ inputs.project-id }}
+        BWS_ACCESS_TOKEN: ${{ inputs.access-token }}
+        SECRETS: ${{ steps.split.outputs.optional-secrets }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+        ALLOW_EMPTY_SECRETS: ${{ inputs.allow-empty-secrets }}
+        BWS_VERSION: ${{ inputs.bws-version }}
+        BWS_SHA256: ${{ inputs.bws-sha256 }}
+      run: |
+        set -euo pipefail
+        umask 077
+
+        project_id_clean="$(printf '%s' "${BWS_PROJECT_ID}" | tr -d '[:space:]')"
+        access_token_clean="$(printf '%s' "${BWS_ACCESS_TOKEN}" | tr -d '[:space:]')"
+        secrets_clean="$(printf '%s' "${SECRETS}" | tr -d '[:space:]')"
+
+        if [ -z "${project_id_clean}" ]; then
+          printf '%s\n' "BWS_PROJECT_ID resolved to empty after normalization" >&2
+          exit 1
+        fi
+        if [ -z "${access_token_clean}" ]; then
+          printf '%s\n' "BWS_ACCESS_TOKEN resolved to empty after normalization" >&2
+          exit 1
+        fi
+        if [ -z "${secrets_clean}" ]; then
+          printf '%s\n' "SECRETS resolved to empty after normalization" >&2
+          exit 1
+        fi
+        if [ -z "${RUNNER_TEMP:-}" ]; then
+          printf '%s\n' "RUNNER_TEMP is not set" >&2
+          exit 1
+        fi
+
+        version="${BWS_VERSION}"
+        checksum="${BWS_SHA256}"
+        base_url="https://github.com/mattycramer/sdk-sm/releases/download/gl-bws-cli-v${version}"
+        archive="bws-x86_64-unknown-linux-gnu-${version}.tar.gz"
+        checksum_file="bws-sha256-checksums-${version}.txt"
+        tmp_dir="$(mktemp -d "${RUNNER_TEMP}/bws-optional-${version}-XXXXXX")"
+
+        curl --proto '=https' --tlsv1.2 --fail --location --max-time 30 \
+          --retry 3 --retry-delay 1 --silent --show-error \
+          -o "${tmp_dir}/${archive}" "${base_url}/${archive}"
+        curl --proto '=https' --tlsv1.2 --fail --location --max-time 30 \
+          --retry 3 --retry-delay 1 --silent --show-error \
+          -o "${tmp_dir}/${checksum_file}" "${base_url}/${checksum_file}"
+
+        expected="$(
+          printf '%s\n' \
+            'import sys' \
+            'checksum_path = sys.argv[1]' \
+            'target = sys.argv[2]' \
+            'expected = ""' \
+            'with open(checksum_path, "r", encoding="utf-8") as handle:' \
+            '    for line in handle:' \
+            '        line = line.strip()' \
+            '        if not line:' \
+            '            continue' \
+            '        parts = line.split()' \
+            '        if len(parts) < 2:' \
+            '            continue' \
+            '        checksum, name = parts[0], parts[1]' \
+            '        if name.startswith("*"):' \
+            '            name = name[1:]' \
+            '        if name.startswith("./"):' \
+            '            name = name[2:]' \
+            '        if name == target:' \
+            '            expected = checksum' \
+            '            break' \
+            'if not expected:' \
+            '    sys.exit(1)' \
+            'print(expected)' \
+          | python3 - "${tmp_dir}/${checksum_file}" "${archive}"
+        )" || {
+          printf '%s\n' "Checksum for ${archive} not found" >&2
+          exit 1
+        }
+
+        if [ "${expected}" != "${checksum}" ]; then
+          printf '%s\n' "Checksum mismatch for ${archive}" >&2
+          exit 1
+        fi
+
+        printf '%s  %s\n' "${expected}" "${archive}" > "${tmp_dir}/bws.sha256"
+        (
+          cd "${tmp_dir}"
+          sha256sum --check bws.sha256
+        )
+
+        tar -xzf "${tmp_dir}/${archive}" -C "${tmp_dir}"
+        bws_path="${tmp_dir}/bws"
+        if [ ! -x "${bws_path}" ]; then
+          bws_path="$(
+            find "${tmp_dir}" -type f -name bws -perm -u+x | head -n 1
+          )"
+        fi
+        if [ -z "${bws_path}" ]; then
+          printf '%s\n' "bws binary not found after extraction" >&2
+          exit 1
+        fi
+
+        BWS_PROJECT_ID="${project_id_clean}" BWS_ACCESS_TOKEN="${access_token_clean}" \
+          "${bws_path}" run --project-id "${project_id_clean}" --no-inherit-env -- \
+          env SECRETS="${secrets_clean}" OUTPUT_DIR="${OUTPUT_DIR}" \
+          ALLOW_EMPTY_SECRETS="${ALLOW_EMPTY_SECRETS}" \
+          GITHUB_ENV="${GITHUB_ENV}" PATH="${PATH}" \
+          python3 "${{ github.action_path }}/write_secrets.py"
+
+        rm -rf "${tmp_dir}"
