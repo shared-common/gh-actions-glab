@@ -20,7 +20,6 @@ def make_policy() -> BranchPolicy:
     mirrors = (
         BranchSpec("GIT_BRANCH_MAIN", "main", "gitlab/mcr/main", True, True),
         BranchSpec("GIT_BRANCH_STAGING", "staging", "gitlab/mcr/staging", True, True),
-        BranchSpec("GIT_BRANCH_RELEASE", "release", "gitlab/mcr/release", True, True),
     )
     snapshot = BranchSpec("GIT_BRANCH_SNAPSHOT", "snapshot", "mcr/snapshot", False, False)
     return BranchPolicy(prefix="mcr", mirror_prefix="gitlab", mirrors=mirrors, snapshot=snapshot)
@@ -110,8 +109,6 @@ class GlabSyncTests(unittest.TestCase):
             if branch == "gitlab/mcr/main":
                 return "b" * 40
             if branch == "gitlab/mcr/staging":
-                return "a" * 40
-            if branch == "gitlab/mcr/release":
                 return "a" * 40
             if branch == "mcr/snapshot":
                 return None

@@ -52,7 +52,6 @@ jobs:
             GIT_BRANCH_PREFIX,
             GIT_BRANCH_MAIN,
             GIT_BRANCH_STAGING,
-            GIT_BRANCH_RELEASE,
             GIT_BRANCH_SNAPSHOT
           allow-empty-secrets: GL_FORKS_EXT_JSON
           output-dir: .secrets

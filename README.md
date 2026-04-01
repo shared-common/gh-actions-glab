@@ -31,14 +31,12 @@ The branch names come from Bitwarden secrets:
 - `GIT_BRANCH_PREFIX`
 - `GIT_BRANCH_MAIN`
 - `GIT_BRANCH_STAGING`
-- `GIT_BRANCH_RELEASE`
 - `GIT_BRANCH_SNAPSHOT`
 
 Managed branches are:
 
 - `gitlab/<prefix>/<main>`: tracked, force-syncable, protected
 - `gitlab/<prefix>/<staging>`: tracked, force-syncable, protected
-- `gitlab/<prefix>/<release>`: tracked, force-syncable, protected
 - `<prefix>/<snapshot>`: create once from the initial source default branch,
   never updated, never protected
 
@@ -65,7 +63,6 @@ Common:
 - `GIT_BRANCH_PREFIX`
 - `GIT_BRANCH_MAIN`
 - `GIT_BRANCH_STAGING`
-- `GIT_BRANCH_RELEASE`
 - `GIT_BRANCH_SNAPSHOT`
 
 External mode:

@@ -19,7 +19,6 @@ class BranchPolicyTests(unittest.TestCase):
             "GIT_BRANCH_PREFIX": "mcr",
             "GIT_BRANCH_MAIN": "main",
             "GIT_BRANCH_STAGING": "staging",
-            "GIT_BRANCH_RELEASE": "release",
             "GIT_BRANCH_SNAPSHOT": "snapshot",
         }
         with mock.patch.object(branch_policy, "require_secret", side_effect=lambda name: values[name]):
@@ -31,7 +30,6 @@ class BranchPolicyTests(unittest.TestCase):
             [
                 "gitlab/mcr/main",
                 "gitlab/mcr/staging",
-                "gitlab/mcr/release",
             ],
         )
         self.assertEqual(policy.snapshot.target_name, "mcr/snapshot")

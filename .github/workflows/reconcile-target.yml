@@ -61,7 +61,7 @@ jobs:
               ;;
           esac
           printf 'secrets=%s\n' \
-            "GL_BASE_URL,${client_secrets},GIT_BRANCH_PREFIX,GIT_BRANCH_MAIN,GIT_BRANCH_STAGING,GIT_BRANCH_RELEASE,GIT_BRANCH_SNAPSHOT" \
+            "GL_BASE_URL,${client_secrets},GIT_BRANCH_PREFIX,GIT_BRANCH_MAIN,GIT_BRANCH_STAGING,GIT_BRANCH_SNAPSHOT" \
             >> "${GITHUB_OUTPUT}"
 
       - name: Fetch reconcile secrets from BWS

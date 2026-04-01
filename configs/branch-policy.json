@@ -9,10 +9,6 @@
     {
       "nameEnv": "GIT_BRANCH_STAGING",
       "protected": true
-    },
-    {
-      "nameEnv": "GIT_BRANCH_RELEASE",
-      "protected": true
     }
   ],
   "snapshot": {
