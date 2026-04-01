@@ -4,13 +4,15 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -40,9 +42,7 @@ class GitLabClient:
     def project_git_url(self, project_path: str) -> str:
         validate_project_path(project_path, "project_path")
         host = self.base_url.replace("https://", "").replace("http://", "").rstrip("/")
-        username = urllib.parse.quote(self.username, safe="")
-        token = urllib.parse.quote(self.token, safe="")
-        return f"https://{username}:{token}@{host}/{project_path}.git"
+        return f"https://{host}/{project_path}.git"
 
     def project_web_url(self, project_path: str) -> str:
         validate_project_path(project_path, "project_path")
@@ -198,11 +198,17 @@ def normalize_gitlab_project_url(value: str, label: str) -> str:
     return f"https://{parsed.netloc}/{'/'.join(parts)}.git"
 
 
-def git_source_head(remote_url: str, *, secrets: Iterable[str] = ()) -> tuple[str, str]:
+def git_source_head(
+    remote_url: str,
+    *,
+    secrets: Iterable[str] = (),
+    env_overrides: Optional[dict[str, str]] = None,
+) -> tuple[str, str]:
     proc = run_command(
         ["git", "ls-remote", "--symref", remote_url, "HEAD"],
         secrets=secrets,
         timeout=120,
+        env_overrides=env_overrides,
     )
     branch = ""
     sha = ""
@@ -232,9 +238,12 @@ def run_command(
     cwd: Optional[str] = None,
     secrets: Iterable[str] = (),
     timeout: int = 120,
+    env_overrides: Optional[dict[str, str]] = None,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    if env_overrides:
+        env.update(env_overrides)
     command_text = sanitize(" ".join(cmd), secrets)
     try:
         proc = subprocess.run(
@@ -253,6 +262,58 @@ def run_command(
         stderr = sanitize(proc.stderr.strip(), secrets)
         raise SystemExit(stderr or f"Command failed: {command_text}")
     return proc
+
+
+@contextmanager
+def git_askpass_env(client: GitLabClient) -> Iterator[dict[str, str]]:
+    expected_host = urllib.parse.urlparse(client.base_url).netloc.strip()
+    if not expected_host:
+        raise SystemExit("GL_BASE_URL does not contain a valid host")
+
+    with tempfile.TemporaryDirectory(prefix="gitlab-auth-") as temp_dir:
+        temp_path = Path(temp_dir)
+        username_path = temp_path / "username"
+        token_path = temp_path / "token"
+        host_path = temp_path / "host"
+        askpass_path = temp_path / "askpass.sh"
+
+        username_path.write_text(client.username, encoding="utf-8")
+        token_path.write_text(client.token, encoding="utf-8")
+        host_path.write_text(expected_host, encoding="utf-8")
+        os.chmod(username_path, 0o600)
+        os.chmod(token_path, 0o600)
+        os.chmod(host_path, 0o600)
+
+        askpass_path.write_text(
+            "\n".join(
+                [
+                    "#!/bin/sh",
+                    "set -eu",
+                    'prompt="${1:-}"',
+                    'expected_host="$(cat "${GH_ACTIONS_GITLAB_HOST_FILE}")"',
+                    'case "${prompt}" in',
+                    '  *"${expected_host}"*) ;;',
+                    "  *) exit 1 ;;",
+                    "esac",
+                    'case "${prompt}" in',
+                    '  Username*) cat "${GH_ACTIONS_GITLAB_USERNAME_FILE}" ;;',
+                    '  Password*) cat "${GH_ACTIONS_GITLAB_TOKEN_FILE}" ;;',
+                    "  *) exit 1 ;;",
+                    "esac",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        os.chmod(askpass_path, 0o700)
+
+        yield {
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": str(askpass_path),
+            "GH_ACTIONS_GITLAB_USERNAME_FILE": str(username_path),
+            "GH_ACTIONS_GITLAB_TOKEN_FILE": str(token_path),
+            "GH_ACTIONS_GITLAB_HOST_FILE": str(host_path),
+        }
 
 
 def gitlab_request(

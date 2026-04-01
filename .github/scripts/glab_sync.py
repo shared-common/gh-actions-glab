@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -13,6 +14,7 @@ from _common import (
     ensure_gitlab_default_branch,
     ensure_gitlab_project,
     ensure_gitlab_protected_branch,
+    git_askpass_env,
     get_gitlab_protected_branch,
     get_gitlab_branch_sha,
     get_gitlab_project,
@@ -71,6 +73,11 @@ class TargetSpec:
             source=normalized_source,
             repo_name=repo_name,
         )
+
+    @property
+    def target_id(self) -> str:
+        digest = hashlib.sha256(self.target_project_path.encode("utf-8")).hexdigest()
+        return f"target-{digest[:12]}"
 
     @property
     def source_display(self) -> str:
@@ -146,7 +153,12 @@ def build_source_git_url(target: TargetSpec, client: GitLabClient) -> str:
 
 def inspect_target(target: TargetSpec, policy: BranchPolicy, client: GitLabClient) -> dict[str, Any]:
     source_url = build_source_git_url(target, client)
-    source_default_branch, source_sha = git_source_head(source_url, secrets=(client.token, client.username))
+    with git_askpass_env(client) as git_env:
+        source_default_branch, source_sha = git_source_head(
+            source_url,
+            secrets=(client.token, client.username),
+            env_overrides=git_env if target.mode == "internal" else None,
+        )
 
     reasons: list[str] = []
     branch_state: dict[str, dict[str, Any]] = {}
@@ -194,9 +206,9 @@ def inspect_target(target: TargetSpec, policy: BranchPolicy, client: GitLabClien
 
     return {
         "mode": target.mode,
+        "target_id": target.target_id,
         "repo_name": target.repo_name,
         "target_project_path": target.target_project_path,
-        "target_project_url": client.project_web_url(target.target_project_path),
         "source": target.source_display,
         "source_default_branch": source_default_branch,
         "source_sha": source_sha,
@@ -220,10 +232,11 @@ def _push_branch(
     expected_remote_sha: str | None,
     allow_existing: bool = False,
     secrets: tuple[str, ...] = (),
+    env_overrides: dict[str, str] | None = None,
 ) -> str:
     import subprocess
 
-    def run_push(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def run_push(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
         command_text = sanitize(" ".join(command), secrets)
         try:
             return subprocess.run(
@@ -242,11 +255,13 @@ def _push_branch(
         ["git", "-C", repo_path, "lfs", "fetch", source_remote, f"refs/heads/{source_branch}"],
         secrets=secrets,
         timeout=300,
+        env_overrides=env_overrides,
     )
     run_command(
         ["git", "-C", repo_path, "lfs", "push", target_remote, f"refs/heads/{source_branch}"],
         secrets=secrets,
         timeout=300,
+        env_overrides=env_overrides,
     )
 
     command = [
@@ -259,7 +274,9 @@ def _push_branch(
     ]
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
-    push_proc = run_push(command)
+    if env_overrides:
+        env.update(env_overrides)
+    push_proc = run_push(command, env)
     if push_proc.returncode == 0:
         return "updated"
 
@@ -280,7 +297,7 @@ def _push_branch(
             target_url,
             f"refs/heads/{source_branch}:refs/heads/{target_branch}",
         ]
-        force_proc = run_push(force_command)
+        force_proc = run_push(force_command, env)
         if force_proc.returncode == 0:
             return "updated"
         raise SystemExit(sanitize(force_proc.stderr.strip(), secrets))
@@ -290,100 +307,123 @@ def _push_branch(
 
 def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabClient) -> dict[str, Any]:
     source_url = build_source_git_url(target, client)
-    source_default_branch, source_sha = git_source_head(source_url, secrets=(client.token, client.username))
-
-    project, created = ensure_gitlab_project(client, target.target_project_path)
-    project_id = int(project["id"])
-    target_url = client.project_git_url(target.target_project_path)
-    secrets = (client.token, client.username)
-
-    results: dict[str, list[str]] = {
-        "created": [],
-        "updated": [],
-        "skipped": [],
-        "protected": [],
-        "unprotected": [],
-    }
-
-    if created:
-        results["created"].append(f"project:{target.target_project_path}")
-
-    with tempfile.TemporaryDirectory() as repo_dir:
-        repo_path = str(Path(repo_dir) / "repo.git")
-        run_command(["git", "init", "--bare", repo_path], secrets=secrets, timeout=120)
-        run_command(["git", "-C", repo_path, "remote", "add", "source", source_url], secrets=secrets, timeout=120)
-        run_command(["git", "-C", repo_path, "remote", "add", "target", target_url], secrets=secrets, timeout=120)
-        run_command(["git", "-C", repo_path, "lfs", "install", "--local"], secrets=secrets, timeout=120)
-        run_command(
-            [
-                "git",
-                "-C",
-                repo_path,
-                "fetch",
-                source_url,
-                f"refs/heads/{source_default_branch}:refs/heads/{source_default_branch}",
-            ],
-            secrets=secrets,
-            timeout=300,
+    with git_askpass_env(client) as git_env:
+        source_default_branch, source_sha = git_source_head(
+            source_url,
+            secrets=(client.token, client.username),
+            env_overrides=git_env if target.mode == "internal" else None,
         )
 
-        for branch in policy.mirrors:
-            existing_sha = get_gitlab_branch_sha(client, project_id, branch.target_name)
-            if existing_sha == source_sha:
-                results["skipped"].append(branch.target_name)
-            else:
-                outcome = _push_branch(
+        project, created = ensure_gitlab_project(client, target.target_project_path)
+        project_id = int(project["id"])
+        target_url = client.project_git_url(target.target_project_path)
+        secrets = (client.token, client.username)
+
+        results: dict[str, list[str]] = {
+            "created": [],
+            "updated": [],
+            "skipped": [],
+            "protected": [],
+            "unprotected": [],
+        }
+
+        if created:
+            results["created"].append(f"project:{target.target_project_path}")
+
+        with tempfile.TemporaryDirectory() as repo_dir:
+            repo_path = str(Path(repo_dir) / "repo.git")
+            run_command(["git", "init", "--bare", repo_path], secrets=secrets, timeout=120, env_overrides=git_env)
+            run_command(
+                ["git", "-C", repo_path, "remote", "add", "source", source_url],
+                secrets=secrets,
+                timeout=120,
+                env_overrides=git_env,
+            )
+            run_command(
+                ["git", "-C", repo_path, "remote", "add", "target", target_url],
+                secrets=secrets,
+                timeout=120,
+                env_overrides=git_env,
+            )
+            run_command(
+                ["git", "-C", repo_path, "lfs", "install", "--local"],
+                secrets=secrets,
+                timeout=120,
+                env_overrides=git_env,
+            )
+            run_command(
+                [
+                    "git",
+                    "-C",
+                    repo_path,
+                    "fetch",
+                    source_url,
+                    f"refs/heads/{source_default_branch}:refs/heads/{source_default_branch}",
+                ],
+                secrets=secrets,
+                timeout=300,
+                env_overrides=git_env if target.mode == "internal" else None,
+            )
+
+            for branch in policy.mirrors:
+                existing_sha = get_gitlab_branch_sha(client, project_id, branch.target_name)
+                if existing_sha == source_sha:
+                    results["skipped"].append(branch.target_name)
+                else:
+                    outcome = _push_branch(
+                        repo_path,
+                        source_url,
+                        target_url,
+                        source_default_branch,
+                        branch.target_name,
+                        source_remote="source",
+                        target_remote="target",
+                        expected_remote_sha=existing_sha,
+                        secrets=secrets,
+                        env_overrides=git_env,
+                    )
+                    bucket = "created" if existing_sha is None else "updated"
+                    if outcome == "skipped":
+                        bucket = "skipped"
+                    results[bucket].append(branch.target_name)
+                if branch.protected and ensure_gitlab_protected_branch(client, project_id, branch.target_name):
+                    results["protected"].append(branch.target_name)
+
+            snapshot_sha = get_gitlab_branch_sha(client, project_id, policy.snapshot.target_name)
+            if snapshot_sha is None:
+                _push_branch(
                     repo_path,
                     source_url,
                     target_url,
                     source_default_branch,
-                    branch.target_name,
+                    policy.snapshot.target_name,
                     source_remote="source",
                     target_remote="target",
-                    expected_remote_sha=existing_sha,
+                    expected_remote_sha=None,
+                    allow_existing=True,
                     secrets=secrets,
+                    env_overrides=git_env,
                 )
-                bucket = "created" if existing_sha is None else "updated"
-                if outcome == "skipped":
-                    bucket = "skipped"
-                results[bucket].append(branch.target_name)
-            if branch.protected and ensure_gitlab_protected_branch(client, project_id, branch.target_name):
-                results["protected"].append(branch.target_name)
+                results["created"].append(policy.snapshot.target_name)
+            else:
+                results["skipped"].append(policy.snapshot.target_name)
+            if delete_gitlab_protected_branch(client, project_id, policy.snapshot.target_name):
+                results["unprotected"].append(policy.snapshot.target_name)
 
-        snapshot_sha = get_gitlab_branch_sha(client, project_id, policy.snapshot.target_name)
-        if snapshot_sha is None:
-            _push_branch(
-                repo_path,
-                source_url,
-                target_url,
-                source_default_branch,
-                policy.snapshot.target_name,
-                source_remote="source",
-                target_remote="target",
-                expected_remote_sha=None,
-                allow_existing=True,
-                secrets=secrets,
-            )
-            results["created"].append(policy.snapshot.target_name)
-        else:
-            results["skipped"].append(policy.snapshot.target_name)
-        if delete_gitlab_protected_branch(client, project_id, policy.snapshot.target_name):
-            results["unprotected"].append(policy.snapshot.target_name)
+        default_branch_changed = ensure_gitlab_default_branch(client, project_id, policy.default_branch)
+        if default_branch_changed:
+            results["updated"].append(f"default_branch:{policy.default_branch}")
 
-    default_branch_changed = ensure_gitlab_default_branch(client, project_id, policy.default_branch)
-    if default_branch_changed:
-        results["updated"].append(f"default_branch:{policy.default_branch}")
-
-    return {
-        "mode": target.mode,
-        "repo_name": target.repo_name,
-        "target_project_path": target.target_project_path,
-        "target_project_url": client.project_web_url(target.target_project_path),
-        "source": target.source_display,
-        "source_default_branch": source_default_branch,
-        "source_sha": source_sha,
-        "results": results,
-    }
+        return {
+            "mode": target.mode,
+            "target_id": target.target_id,
+            "repo_name": target.repo_name,
+            "target_project_path": target.target_project_path,
+            "source": target.source_display,
+            "source_default_branch": source_default_branch,
+            "source_sha": source_sha,
+            "results": results,
+        }
 
 
 def write_json(path: str, payload: dict[str, Any]) -> None:
@@ -408,13 +448,13 @@ def render_plan_summary(mode: str, inspected: list[dict[str, Any]], errors: list
         lines.append("")
         for item in actionable:
             reasons = ", ".join(item.get("reasons", []))
-            lines.append(f"- `{item['target_project_path']}` from `{item['source']}`: {reasons}")
+            lines.append(f"- `{item['target_id']}`: {reasons}")
         lines.append("")
     if errors:
         lines.append("### Inspection errors")
         lines.append("")
         for item in errors:
-            lines.append(f"- `{item['target_project_path']}`: {item['error']}")
+            lines.append(f"- `{item['target_id']}`: {item['error']}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -427,12 +467,11 @@ def render_reconcile_summary(payload: dict[str, Any]) -> str:
     protected = results.get("protected", [])
     unprotected = results.get("unprotected", [])
     lines = [
-        f"## Reconciled `{payload['target_project_path']}`",
+        f"## Reconciled `{payload['target_id']}`",
         "",
-        f"- source: `{payload['source']}`",
+        f"- mode: `{payload['mode']}`",
         f"- source default branch: `{payload['source_default_branch']}`",
         f"- source sha: `{payload['source_sha']}`",
-        f"- target: {payload['target_project_url']}",
         "",
         f"- created: {len(created)}",
         f"- updated: {len(updated)}",

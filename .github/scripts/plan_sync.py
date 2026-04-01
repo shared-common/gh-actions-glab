@@ -29,7 +29,7 @@ def main() -> int:
         except SystemExit as exc:
             errors.append(
                 {
-                    "target_project_path": target.target_project_path,
+                    "target_id": target.target_id,
                     "error": str(exc) or "inspection_failed",
                 }
             )
@@ -38,8 +38,7 @@ def main() -> int:
         if planned.get("needs_reconcile"):
             matrix_include.append(
                 {
-                    "target_id": target.target_project_path.replace("/", "__"),
-                    "target_project_path": target.target_project_path,
+                    "target_id": target.target_id,
                     "target_json": json.dumps(target.to_payload(), separators=(",", ":")),
                 }
             )

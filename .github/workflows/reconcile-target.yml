@@ -10,9 +10,6 @@ name: reconcile-target
       target-id:
         required: true
         type: string
-      target-project-path:
-        required: true
-        type: string
       target-json:
         required: true
         type: string

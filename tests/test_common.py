@@ -52,6 +52,17 @@ class CommonTests(unittest.TestCase):
         self.assertFalse(_common.protected_branch_allows_sync(too_open))
         self.assertFalse(_common.protected_branch_allows_sync(wrong_merge))
 
+    def test_project_git_url_does_not_embed_credentials(self):
+        client = _common.GitLabClient(
+            base_url="https://gitlab.com",
+            username="svc-user",
+            token="secret-token",
+        )
+        self.assertEqual(
+            client.project_git_url("top/sub/project"),
+            "https://gitlab.com/top/sub/project.git",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

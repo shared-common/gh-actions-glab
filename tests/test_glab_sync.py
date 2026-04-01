@@ -94,6 +94,7 @@ class GlabSyncTests(unittest.TestCase):
 
         self.assertTrue(planned["needs_reconcile"])
         self.assertEqual(planned["reasons"], ["project_missing"])
+        self.assertTrue(planned["target_id"].startswith("target-"))
 
     def test_inspect_target_flags_drift_and_protection(self):
         client = GitLabClient(base_url="https://gitlab.com", username="svc", token="token")
@@ -166,14 +167,38 @@ class GlabSyncTests(unittest.TestCase):
         summary = glab_sync.render_plan_summary(
             "external",
             [
-                {"target_project_path": "a/b/demo", "source": "https://example/demo", "needs_reconcile": True, "reasons": ["project_missing"]},
-                {"target_project_path": "a/b/clean", "source": "https://example/clean", "needs_reconcile": False, "reasons": []},
+                {"target_id": "target-111111111111", "target_project_path": "a/b/demo", "source": "https://example/demo", "needs_reconcile": True, "reasons": ["project_missing"]},
+                {"target_id": "target-222222222222", "target_project_path": "a/b/clean", "source": "https://example/clean", "needs_reconcile": False, "reasons": []},
             ],
-            [{"target_project_path": "a/b/error", "error": "boom"}],
+            [{"target_id": "target-333333333333", "error": "boom"}],
         )
         self.assertIn("- inspected: 2", summary)
         self.assertIn("- actionable: 1", summary)
         self.assertIn("- errors: 1", summary)
+        self.assertNotIn("a/b/demo", summary)
+        self.assertNotIn("https://example/demo", summary)
+
+    def test_render_reconcile_summary_redacts_target_identity(self):
+        summary = glab_sync.render_reconcile_summary(
+            {
+                "target_id": "target-aaaaaaaaaaaa",
+                "target_project_path": "top/sub/demo",
+                "source": "https://gitlab.example/top/demo.git",
+                "mode": "external",
+                "source_default_branch": "main",
+                "source_sha": "a" * 40,
+                "results": {
+                    "created": ["gitlab/mcr/main"],
+                    "updated": [],
+                    "skipped": [],
+                    "protected": [],
+                    "unprotected": [],
+                },
+            }
+        )
+        self.assertIn("target-aaaaaaaaaaaa", summary)
+        self.assertNotIn("top/sub/demo", summary)
+        self.assertNotIn("https://gitlab.example/top/demo.git", summary)
 
     def test_load_gitlab_client_uses_mode_specific_secret_names(self):
         values = {

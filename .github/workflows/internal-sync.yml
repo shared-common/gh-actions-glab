@@ -81,7 +81,7 @@ jobs:
           rm -rf .secrets
 
   reconcile:
-    name: reconcile-${{ matrix.target_project_path }}
+    name: reconcile-${{ matrix.target_id }}
     needs: plan
     if: needs.plan.outputs.should_run == 'true'
     permissions:
@@ -94,7 +94,6 @@ jobs:
     with:
       mode: internal
       target-id: ${{ matrix.target_id }}
-      target-project-path: ${{ matrix.target_project_path }}
       target-json: ${{ matrix.target_json }}
     secrets:
       BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}

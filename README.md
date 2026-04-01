@@ -21,6 +21,9 @@ project is missing, when managed branches are missing, when the tracked mirror
 branches drift from the source default branch, or when protected branch settings
 need repair.
 
+Workflow job names and rendered step summaries use redacted stable target ids
+instead of the actual target project path or target URL.
+
 ## Managed branches
 
 The branch names come from Bitwarden secrets:
