@@ -7,9 +7,6 @@ name: reconcile-target
       mode:
         required: true
         type: string
-      target-id:
-        required: true
-        type: string
     secrets:
       BWS_ACCESS_TOKEN:
         required: true
@@ -19,11 +16,11 @@ name: reconcile-target
 permissions: {}
 
 jobs:
-  reconcile:
+  sync:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
     concurrency:
-      group: reconcile-${{ inputs.target-id }}
+      group: reconcile-${{ inputs.mode }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -47,10 +44,10 @@ jobs:
           set -euo pipefail
           case "${MODE}" in
             external)
-              client_secrets="GL_PAT_FORK_SEEDBED_SVC,GL_BRIDGE_FORK_USER_SEEDBED"
+              mode_secrets="GL_PAT_FORK_SEEDBED_SVC,GL_BRIDGE_FORK_USER_SEEDBED,GL_GROUP_TOP_UPSTREAM,GL_GROUP_SUB_MAINLINE,GL_FORKS_EXT_JSON"
               ;;
             internal)
-              client_secrets="GL_PAT_FORK_GLAB_SVC,GL_BRIDGE_FORK_USER_GLAB"
+              mode_secrets="GL_PAT_FORK_GLAB_SVC,GL_BRIDGE_FORK_USER_GLAB,GL_FORKS_INT_JSON"
               ;;
             *)
               printf '%s\n' "Unsupported mode: ${MODE}" >&2
@@ -58,7 +55,7 @@ jobs:
               ;;
           esac
           printf 'secrets=%s\n' \
-            "GL_BASE_URL,${client_secrets},GIT_BRANCH_PREFIX,GIT_BRANCH_MAIN,GIT_BRANCH_STAGING,GIT_BRANCH_SNAPSHOT" \
+            "GL_BASE_URL,${mode_secrets},GIT_BRANCH_PREFIX,GIT_BRANCH_MAIN,GIT_BRANCH_STAGING,GIT_BRANCH_SNAPSHOT" \
             >> "${GITHUB_OUTPUT}"
 
       - name: Fetch reconcile secrets from BWS
@@ -80,23 +77,46 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/mask_secret_files.py
 
-      - name: Reconcile target project
+      - name: Plan sync targets
+        id: plan
         shell: bash
         env:
           SYNC_MODE: ${{ inputs.mode }}
-          TARGET_ID: ${{ inputs.target-id }}
-          OUTPUT_PATH: reconcile.json
-          SUMMARY_PATH: reconcile.md
+          OUTPUT_PATH: plan.json
+          SUMMARY_PATH: plan.md
         run: |
           set -euo pipefail
-          python3 .github/scripts/reconcile_target.py
+          python3 .github/scripts/plan_sync.py
 
-      - name: Publish reconcile summary
+      - name: Publish plan summary
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          cat reconcile.md >> "${GITHUB_STEP_SUMMARY}"
+          if [ -f plan.md ]; then
+            cat plan.md >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Reconcile queued targets
+        if: steps.plan.outputs.should_run == 'true'
+        shell: bash
+        env:
+          SYNC_MODE: ${{ inputs.mode }}
+          PLAN_PATH: plan.json
+          OUTPUT_PATH: reconcile.json
+          SUMMARY_PATH: reconcile.md
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/reconcile_planned_targets.py
+
+      - name: Publish reconcile summary
+        if: always() && steps.plan.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f reconcile.md ]; then
+            cat reconcile.md >> "${GITHUB_STEP_SUMMARY}"
+          fi
 
       - name: Cleanup secrets
         if: always()

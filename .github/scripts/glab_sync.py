@@ -523,3 +523,42 @@ def render_reconcile_summary(payload: dict[str, Any]) -> str:
                 lines.append(f"- `{value}`")
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def render_reconcile_batch_summary(
+    mode: str,
+    queued_count: int,
+    reconciled: list[dict[str, Any]],
+    errors: list[dict[str, str]],
+) -> str:
+    title = "External" if mode == "external" else "Internal"
+    lines = [
+        f"## {title} reconcile run",
+        "",
+        f"- queued: {queued_count}",
+        f"- reconciled: {len(reconciled)}",
+        f"- errors: {len(errors)}",
+        "",
+    ]
+    if reconciled:
+        lines.append("### Reconciled targets")
+        lines.append("")
+        for payload in reconciled:
+            results = payload.get("results", {})
+            lines.append(
+                "- "
+                f"`{payload['target_id']}`: "
+                f"created={len(results.get('created', []))}, "
+                f"updated={len(results.get('updated', []))}, "
+                f"skipped={len(results.get('skipped', []))}, "
+                f"protected={len(results.get('protected', []))}, "
+                f"unprotected={len(results.get('unprotected', []))}"
+            )
+        lines.append("")
+    if errors:
+        lines.append("### Reconcile errors")
+        lines.append("")
+        for item in errors:
+            lines.append(f"- `{item['target_id']}`: {item['error']}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"

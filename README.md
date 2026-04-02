@@ -13,13 +13,14 @@ It provides:
 
 - `external-sync.yml`: runs at `0 * * * *` and inspects `GL_FORKS_EXT_JSON`
 - `internal-sync.yml`: runs at `30 * * * *` and inspects `GL_FORKS_INT_JSON`
-- `reconcile-target.yml`: reusable workflow that creates or repairs one GitLab
-  project at a time
+- `reconcile-target.yml`: reusable workflow that plans and reconciles one sync
+  mode on a single runner
 
-The scheduled workflows only fan out to `reconcile-target.yml` when a target
-project is missing, when managed branches are missing, when the tracked mirror
-branches drift from the source default branch, or when protected branch settings
-need repair.
+The scheduled workflows call `reconcile-target.yml` once per mode. The reusable
+workflow plans first, writes a local redacted reconcile queue, and only runs the
+reconcile phase when one or more targets are missing, when managed branches are
+missing, when the tracked mirror branches drift from the source default branch,
+or when protected branch settings need repair.
 
 Workflow job names and rendered step summaries use redacted stable target ids
 instead of the actual target project path or target URL.

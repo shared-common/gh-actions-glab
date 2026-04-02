@@ -28,7 +28,7 @@ def main() -> int:
 
     inspected: list[dict] = []
     errors: list[dict[str, str]] = []
-    matrix_include: list[dict[str, str]] = []
+    reconcile_queue: list[dict[str, str]] = []
 
     for target in targets:
         try:
@@ -43,7 +43,7 @@ def main() -> int:
             continue
         inspected.append(planned)
         if planned.get("needs_reconcile"):
-            matrix_include.append(
+            reconcile_queue.append(
                 {
                     "target_id": target.target_id,
                 }
@@ -53,7 +53,7 @@ def main() -> int:
         "mode": mode,
         "inspected": inspected,
         "errors": errors,
-        "matrix": matrix_include,
+        "reconcile_queue": reconcile_queue,
     }
     write_json(output_path, payload)
     Path(summary_path).write_text(render_plan_summary(mode, inspected, errors), encoding="utf-8")
@@ -61,11 +61,10 @@ def main() -> int:
     if github_output:
         with open(github_output, "a", encoding="utf-8") as handle:
             handle.write(f"has_targets={'true' if bool(targets) else 'false'}\n")
-            handle.write(f"should_run={'true' if bool(matrix_include) else 'false'}\n")
+            handle.write(f"should_run={'true' if bool(reconcile_queue) else 'false'}\n")
             handle.write(f"target_count={len(targets)}\n")
-            handle.write(f"actionable_count={len(matrix_include)}\n")
+            handle.write(f"actionable_count={len(reconcile_queue)}\n")
             handle.write(f"error_count={len(errors)}\n")
-            handle.write(f"matrix={json.dumps(matrix_include, separators=(',', ':'))}\n")
     return 0
 
 
