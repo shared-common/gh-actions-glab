@@ -19,7 +19,6 @@ from _common import (
     get_gitlab_branch_sha,
     get_gitlab_project,
     normalize_gitlab_project_url,
-    optional_secret,
     protected_branch_allows_sync,
     require_secret,
     run_command,
@@ -84,6 +83,36 @@ class TargetSpec:
         return self.source
 
 
+def redact_target_context(message: str, target: TargetSpec, client: GitLabClient | None = None) -> str:
+    redacted = message
+    candidates = {
+        target.target_project_path,
+        target.target_project_path.rsplit("/", 1)[0],
+        target.source,
+    }
+    if "/" in target.source:
+        candidates.add(target.source.rsplit("/", 1)[0])
+    if target.mode == "external" and target.source.endswith(".git"):
+        candidates.add(target.source[:-4])
+    if client is not None:
+        candidates.update(
+            {
+                client.project_git_url(target.target_project_path),
+                client.project_web_url(target.target_project_path),
+            }
+        )
+        if target.mode == "internal":
+            candidates.update(
+                {
+                    client.project_git_url(target.source),
+                    client.project_web_url(target.source),
+                }
+            )
+    for value in sorted((item for item in candidates if item), key=len, reverse=True):
+        redacted = redacted.replace(value, "[REDACTED]")
+    return redacted
+
+
 def load_gitlab_client(mode: str) -> GitLabClient:
     if mode == "external":
         username_secret = "GL_BRIDGE_FORK_USER_SEEDBED"
@@ -102,9 +131,9 @@ def load_gitlab_client(mode: str) -> GitLabClient:
 
 def load_targets(mode: str) -> list[TargetSpec]:
     if mode == "external":
-        mapping = load_json_mapping(optional_secret("GL_FORKS_EXT_JSON"), "GL_FORKS_EXT_JSON")
+        mapping = load_json_mapping(require_secret("GL_FORKS_EXT_JSON"), "GL_FORKS_EXT_JSON")
         if not mapping:
-            return []
+            raise SystemExit("GL_FORKS_EXT_JSON must contain at least one target mapping")
         group_top = require_secret("GL_GROUP_TOP_UPSTREAM")
         group_sub = require_secret("GL_GROUP_SUB_MAINLINE")
         target_group_path = f"{group_top}/{group_sub}"
@@ -124,9 +153,9 @@ def load_targets(mode: str) -> list[TargetSpec]:
         return targets
 
     if mode == "internal":
-        mapping = load_json_mapping(optional_secret("GL_FORKS_INT_JSON"), "GL_FORKS_INT_JSON")
+        mapping = load_json_mapping(require_secret("GL_FORKS_INT_JSON"), "GL_FORKS_INT_JSON")
         if not mapping:
-            return []
+            raise SystemExit("GL_FORKS_INT_JSON must contain at least one target mapping")
         targets = []
         for target_path, source_path in sorted(mapping.items()):
             validate_project_path(target_path, "internal target path")

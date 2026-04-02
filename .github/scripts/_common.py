@@ -93,11 +93,6 @@ def require_secret(name: str) -> str:
     return value
 
 
-def optional_secret(name: str) -> str:
-    value = _read_secret_file(name, required=False, allow_empty=True)
-    return value or ""
-
-
 def load_json_file(path: str, label: str) -> Any:
     try:
         text = Path(path).read_text(encoding="utf-8")

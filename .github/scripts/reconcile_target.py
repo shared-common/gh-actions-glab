@@ -9,6 +9,7 @@ from branch_policy import load_branch_policy
 from glab_sync import (
     TargetSpec,
     load_gitlab_client,
+    redact_target_context,
     reconcile_target,
     render_reconcile_summary,
     write_json,
@@ -30,7 +31,10 @@ def main() -> int:
     target = TargetSpec.from_payload(target_payload)
     policy = load_branch_policy()
     client = load_gitlab_client(target.mode)
-    payload = reconcile_target(target, policy, client)
+    try:
+        payload = reconcile_target(target, policy, client)
+    except SystemExit as exc:
+        raise SystemExit(redact_target_context(str(exc) or "reconcile_failed", target, client)) from exc
     write_json(output_path, payload)
     Path(summary_path).write_text(render_reconcile_summary(payload), encoding="utf-8")
     return 0

@@ -65,7 +65,8 @@ jobs:
             >> "${GITHUB_OUTPUT}"
 
       - name: Fetch reconcile secrets from BWS
-        uses: ./.github/actions/bws-fetch
+        uses: >-
+          shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
         with:
           access-token: ${{ secrets.BWS_ACCESS_TOKEN }}
           project-id: ${{ secrets.BWS_PROJECT_ID }}
@@ -73,6 +74,14 @@ jobs:
           bws-sha256: ${{ vars.BWS_SHA256 }}
           secrets: ${{ steps.secret_list.outputs.secrets }}
           output-dir: .secrets
+
+      - name: Mask fetched reconcile secrets
+        shell: bash
+        env:
+          SECRET_NAMES: ${{ steps.secret_list.outputs.secrets }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/mask_secret_files.py
 
       - name: Reconcile target project
         shell: bash

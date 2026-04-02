@@ -32,9 +32,8 @@ class GlabSyncTests(unittest.TestCase):
             "GL_GROUP_TOP_UPSTREAM": "top",
             "GL_GROUP_SUB_MAINLINE": "sub",
         }
-        with mock.patch.object(glab_sync, "optional_secret", side_effect=lambda name: values.get(name, "")):
-            with mock.patch.object(glab_sync, "require_secret", side_effect=lambda name: values[name]):
-                targets = glab_sync.load_targets("external")
+        with mock.patch.object(glab_sync, "require_secret", side_effect=lambda name: values[name]):
+            targets = glab_sync.load_targets("external")
 
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0].target_project_path, "top/sub/keepsecret")
@@ -73,10 +72,34 @@ class GlabSyncTests(unittest.TestCase):
         )
         self.assertEqual(target.source, "https://invent.kde.org/utilities/keepsecret.git")
 
-    def test_load_targets_internal_returns_empty_for_blank_secret(self):
-        with mock.patch.object(glab_sync, "optional_secret", return_value=""):
-            targets = glab_sync.load_targets("internal")
-        self.assertEqual(targets, [])
+    def test_load_targets_internal_rejects_empty_mapping(self):
+        values = {
+            "GL_FORKS_INT_JSON": "{}",
+        }
+        with mock.patch.object(glab_sync, "require_secret", side_effect=lambda name: values[name]):
+            with self.assertRaisesRegex(SystemExit, "GL_FORKS_INT_JSON must contain at least one target mapping"):
+                glab_sync.load_targets("internal")
+
+    def test_redact_target_context_replaces_target_identifiers(self):
+        client = GitLabClient(base_url="https://gitlab.example", username="svc", token="token")
+        target = glab_sync.TargetSpec(
+            mode="internal",
+            target_project_path="top/sub/demo",
+            source="top/upstream/demo",
+            repo_name="demo",
+        )
+
+        message = (
+            "Command failed: git push https://gitlab.example/top/sub/demo.git "
+            "https://gitlab.example/top/upstream/demo.git top/sub"
+        )
+        redacted = glab_sync.redact_target_context(message, target, client)
+
+        self.assertNotIn("top/sub/demo", redacted)
+        self.assertNotIn("top/upstream/demo", redacted)
+        self.assertNotIn("https://gitlab.example/top/sub/demo.git", redacted)
+        self.assertNotIn("https://gitlab.example/top/upstream/demo.git", redacted)
+        self.assertIn("[REDACTED]", redacted)
 
     def test_inspect_target_flags_missing_project(self):
         client = GitLabClient(base_url="https://gitlab.com", username="svc", token="token")

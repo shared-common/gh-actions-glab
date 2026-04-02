@@ -108,12 +108,14 @@ and whose values are the source project paths on `GL_BASE_URL`:
 }
 ```
 
-If `GL_FORKS_EXT_JSON` or `GL_FORKS_INT_JSON` is blank or resolves to an empty
-object, the corresponding scheduled workflow exits cleanly without reconciliation.
+`GL_FORKS_EXT_JSON` and `GL_FORKS_INT_JSON` must be non-empty JSON objects.
+Blank values and empty objects are treated as configuration errors.
 
 ## Security model
 
 - Bitwarden secrets are written to files under the runner temp directory
+- Every Bitwarden-fetched secret value is masked with `::add-mask::` before
+  later steps run
 - PATs are never echoed back into logs
 - Git and API calls use bounded retries and explicit timeouts
 - Project and branch names are validated before use

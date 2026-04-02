@@ -5,7 +5,14 @@ import os
 from pathlib import Path
 
 from branch_policy import load_branch_policy
-from glab_sync import inspect_target, load_gitlab_client, load_targets, render_plan_summary, write_json
+from glab_sync import (
+    inspect_target,
+    load_gitlab_client,
+    load_targets,
+    redact_target_context,
+    render_plan_summary,
+    write_json,
+)
 from _common import require_env
 
 
@@ -30,7 +37,7 @@ def main() -> int:
             errors.append(
                 {
                     "target_id": target.target_id,
-                    "error": str(exc) or "inspection_failed",
+                    "error": redact_target_context(str(exc) or "inspection_failed", target, client),
                 }
             )
             continue

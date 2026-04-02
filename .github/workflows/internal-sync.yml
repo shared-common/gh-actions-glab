@@ -36,7 +36,8 @@ jobs:
           python-version: "3.13"
 
       - name: Fetch planning secrets from BWS
-        uses: ./.github/actions/bws-fetch
+        uses: >-
+          shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
         with:
           access-token: ${{ secrets.BWS_ACCESS_TOKEN }}
           project-id: ${{ secrets.BWS_PROJECT_ID }}
@@ -51,8 +52,23 @@ jobs:
             GIT_BRANCH_MAIN,
             GIT_BRANCH_STAGING,
             GIT_BRANCH_SNAPSHOT
-          allow-empty-secrets: GL_FORKS_INT_JSON
           output-dir: .secrets
+
+      - name: Mask fetched planning secrets
+        shell: bash
+        env:
+          SECRET_NAMES: >-
+            GL_BASE_URL,
+            GL_PAT_FORK_GLAB_SVC,
+            GL_BRIDGE_FORK_USER_GLAB,
+            GL_FORKS_INT_JSON,
+            GIT_BRANCH_PREFIX,
+            GIT_BRANCH_MAIN,
+            GIT_BRANCH_STAGING,
+            GIT_BRANCH_SNAPSHOT
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/mask_secret_files.py
 
       - name: Plan internal targets
         id: plan
