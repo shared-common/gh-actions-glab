@@ -108,12 +108,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJson(needs.plan.outputs.matrix) }}
+        include: ${{ fromJson(needs.plan.outputs.matrix || '[]') }}
     uses: ./.github/workflows/reconcile-target.yml
     with:
       mode: external
       target-id: ${{ matrix.target_id }}
-      target-json: ${{ matrix.target_json }}
     secrets:
       BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
       BWS_PROJECT_ID: ${{ secrets.BWS_PROJECT_ID }}

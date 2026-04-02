@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
@@ -9,6 +8,7 @@ from branch_policy import load_branch_policy
 from glab_sync import (
     TargetSpec,
     load_gitlab_client,
+    load_targets,
     redact_target_context,
     reconcile_target,
     render_reconcile_summary,
@@ -16,21 +16,21 @@ from glab_sync import (
 )
 
 
+def load_target(mode: str, target_id: str) -> TargetSpec:
+    for target in load_targets(mode):
+        if target.target_id == target_id:
+            return target
+    raise SystemExit(f"Unknown target id: {target_id}")
+
+
 def main() -> int:
-    target_json = require_env("TARGET_JSON")
+    mode = require_env("SYNC_MODE").strip()
+    target_id = require_env("TARGET_ID").strip()
     output_path = os.environ.get("OUTPUT_PATH", "reconcile.json")
     summary_path = os.environ.get("SUMMARY_PATH", "reconcile.md")
-
-    try:
-        target_payload = json.loads(target_json)
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"TARGET_JSON is not valid JSON: {exc.msg}") from exc
-    if not isinstance(target_payload, dict):
-        raise SystemExit("TARGET_JSON must be a JSON object")
-
-    target = TargetSpec.from_payload(target_payload)
+    target = load_target(mode, target_id)
     policy = load_branch_policy()
-    client = load_gitlab_client(target.mode)
+    client = load_gitlab_client(mode)
     try:
         payload = reconcile_target(target, policy, client)
     except SystemExit as exc:

@@ -10,9 +10,6 @@ name: reconcile-target
       target-id:
         required: true
         type: string
-      target-json:
-        required: true
-        type: string
     secrets:
       BWS_ACCESS_TOKEN:
         required: true
@@ -86,7 +83,8 @@ jobs:
       - name: Reconcile target project
         shell: bash
         env:
-          TARGET_JSON: ${{ inputs.target-json }}
+          SYNC_MODE: ${{ inputs.mode }}
+          TARGET_ID: ${{ inputs.target-id }}
           OUTPUT_PATH: reconcile.json
           SUMMARY_PATH: reconcile.md
         run: |

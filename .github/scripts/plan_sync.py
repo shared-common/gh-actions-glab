@@ -46,7 +46,6 @@ def main() -> int:
             matrix_include.append(
                 {
                     "target_id": target.target_id,
-                    "target_json": json.dumps(target.to_payload(), separators=(",", ":")),
                 }
             )
 
