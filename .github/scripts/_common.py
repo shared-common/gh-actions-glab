@@ -563,6 +563,19 @@ def protected_tag_allows_sync(data: Optional[dict[str, Any]]) -> bool:
     return create_levels == {PROTECTED_TAG_CREATE_LEVEL}
 
 
+def _is_already_exists_conflict(exc: ApiError) -> bool:
+    if exc.status not in {400, 409}:
+        return False
+    message = str(exc).lower()
+    return (
+        "already exists" in message
+        or "has already been taken" in message
+        or "name has already been taken" in message
+        or "protected branch" in message
+        or "protected tag" in message
+    )
+
+
 def ensure_gitlab_protected_branch(client: GitLabClient, project_id: int, branch: str) -> bool:
     current = get_gitlab_protected_branch(client, project_id, branch)
     if protected_branch_allows_sync(current):
@@ -579,7 +592,12 @@ def ensure_gitlab_protected_branch(client: GitLabClient, project_id: int, branch
         "unprotect_access_level": PROTECTED_BRANCH_UNPROTECT_LEVEL,
         "allow_force_push": True,
     }
-    gitlab_request(client, "POST", f"/projects/{project_id}/protected_branches", payload)
+    try:
+        gitlab_request(client, "POST", f"/projects/{project_id}/protected_branches", payload)
+    except ApiError as exc:
+        if not _is_already_exists_conflict(exc):
+            raise
+        return False
     return True
 
 
@@ -605,7 +623,12 @@ def ensure_gitlab_protected_tag(client: GitLabClient, project_id: int, tag: str)
         "name": tag,
         "create_access_level": PROTECTED_TAG_CREATE_LEVEL,
     }
-    gitlab_request(client, "POST", f"/projects/{project_id}/protected_tags", payload)
+    try:
+        gitlab_request(client, "POST", f"/projects/{project_id}/protected_tags", payload)
+    except ApiError as exc:
+        if not _is_already_exists_conflict(exc):
+            raise
+        return False
     return True
 
 
