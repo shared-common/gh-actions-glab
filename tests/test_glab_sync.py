@@ -307,15 +307,13 @@ class GlabSyncTests(unittest.TestCase):
     def test_load_gitlab_client_uses_mode_specific_secret_names(self):
         values = {
             "GL_BASE_URL": "https://gitlab.com",
-            "GL_BRIDGE_FORK_USER_SEEDBED": "seedbed",
-            "GL_PAT_FORK_SEEDBED_SVC": "seedbed-token",
             "GL_BRIDGE_FORK_USER_GLAB": "glab",
             "GL_PAT_FORK_GLAB_SVC": "glab-token",
         }
         with mock.patch.object(glab_sync, "require_secret", side_effect=lambda name: values[name]):
             external = glab_sync.load_gitlab_client("external")
             internal = glab_sync.load_gitlab_client("internal")
-        self.assertEqual((external.username, external.token), ("seedbed", "seedbed-token"))
+        self.assertEqual((external.username, external.token), ("glab", "glab-token"))
         self.assertEqual((internal.username, internal.token), ("glab", "glab-token"))
 
 

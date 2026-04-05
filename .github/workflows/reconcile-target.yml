@@ -53,11 +53,9 @@ jobs:
           set -euo pipefail
           case "${MODE}" in
             external)
-              mode_secrets="GL_PAT_FORK_SEEDBED_SVC,GL_BRIDGE_FORK_USER_SEEDBED"
               config_path=".sync-config/gh-actions-glab/gl_forks_ext.json"
               ;;
             internal)
-              mode_secrets="GL_PAT_FORK_GLAB_SVC,GL_BRIDGE_FORK_USER_GLAB"
               config_path=".sync-config/gh-actions-glab/gl_forks_int.json"
               ;;
             *)
@@ -66,7 +64,7 @@ jobs:
               ;;
           esac
           printf 'secrets=%s\n' \
-            "GL_BASE_URL,${mode_secrets},GIT_BRANCH_PREFIX,GIT_BRANCH_RELEASE,GIT_BRANCH_STAGING,GIT_BRANCH_REV" \
+            "GL_BASE_URL,GL_PAT_FORK_GLAB_SVC,GL_BRIDGE_FORK_USER_GLAB,GIT_BRANCH_PREFIX,GIT_BRANCH_RELEASE,GIT_BRANCH_STAGING,GIT_BRANCH_REV" \
             >> "${GITHUB_OUTPUT}"
           printf 'config_path=%s\n' "${config_path}" >> "${GITHUB_OUTPUT}"
 

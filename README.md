@@ -74,11 +74,6 @@ Common:
 
 External mode:
 
-- `GL_PAT_FORK_SEEDBED_SVC`
-- `GL_BRIDGE_FORK_USER_SEEDBED`
-
-Internal mode:
-
 - `GL_PAT_FORK_GLAB_SVC`
 - `GL_BRIDGE_FORK_USER_GLAB`
 

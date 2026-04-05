@@ -14,7 +14,7 @@ import branch_policy  # noqa: E402
 
 
 class BranchPolicyTests(unittest.TestCase):
-def test_load_branch_policy_builds_managed_refs(self):
+    def test_load_branch_policy_builds_managed_refs(self):
         values = {
             "GIT_BRANCH_PREFIX": "mcr",
             "GIT_BRANCH_RELEASE": "release",

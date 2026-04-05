@@ -275,18 +275,12 @@ def redact_target_context(message: str, target: TargetSpec, client: GitLabClient
 
 
 def load_gitlab_client(mode: str) -> GitLabClient:
-    if mode == "external":
-        username_secret = "GL_BRIDGE_FORK_USER_SEEDBED"
-        token_secret = "GL_PAT_FORK_SEEDBED_SVC"
-    elif mode == "internal":
-        username_secret = "GL_BRIDGE_FORK_USER_GLAB"
-        token_secret = "GL_PAT_FORK_GLAB_SVC"
-    else:
+    if mode not in {"external", "internal"}:
         raise SystemExit(f"Unsupported sync mode: {mode}")
     return GitLabClient(
         base_url=require_secret("GL_BASE_URL"),
-        username=require_secret(username_secret),
-        token=require_secret(token_secret),
+        username=require_secret("GL_BRIDGE_FORK_USER_GLAB"),
+        token=require_secret("GL_PAT_FORK_GLAB_SVC"),
     )
 
 
