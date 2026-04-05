@@ -14,7 +14,7 @@ import branch_policy  # noqa: E402
 
 
 class BranchPolicyTests(unittest.TestCase):
-    def test_load_branch_policy_builds_managed_refs(self):
+def test_load_branch_policy_builds_managed_refs(self):
         values = {
             "GIT_BRANCH_PREFIX": "mcr",
             "GIT_BRANCH_RELEASE": "release",
@@ -32,7 +32,9 @@ class BranchPolicyTests(unittest.TestCase):
                 "gitlab/mcr/staging",
             ],
         )
+        self.assertEqual([item.label for item in policy.mirrors], ["release", "staging"])
         self.assertEqual(policy.rev.target_name, "gitlab/mcr/rev")
+        self.assertEqual(policy.rev.label, "rev")
 
 
 if __name__ == "__main__":

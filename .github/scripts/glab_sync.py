@@ -45,6 +45,7 @@ class NamedSyncSpec:
 
 @dataclass(frozen=True)
 class ManagedBranch:
+    display_name: str
     source_name: str
     target_name: str
     protected: bool
@@ -53,6 +54,7 @@ class ManagedBranch:
 
 @dataclass(frozen=True)
 class ManagedTag:
+    display_name: str
     source_name: str
     target_name: str
     protected: bool
@@ -137,6 +139,7 @@ class TargetSpec:
                 _append_unique_branch(
                     seen_targets,
                     ManagedBranch(
+                        display_name=branch.label,
                         source_name=source_default_branch,
                         target_name=branch.target_name,
                         protected=branch.protected,
@@ -150,6 +153,7 @@ class TargetSpec:
                 _append_unique_branch(
                     seen_targets,
                     ManagedBranch(
+                        display_name=policy.rev.label,
                         source_name=self.branch_rev,
                         target_name=policy.rev.target_name,
                         protected=policy.rev.protected,
@@ -163,6 +167,7 @@ class TargetSpec:
                 _append_unique_branch(
                     seen_targets,
                     ManagedBranch(
+                        display_name=f"branch {branch.name}",
                         source_name=branch.name,
                         target_name=policy.prefixed_branch(branch.name),
                         protected=branch.protected,
@@ -182,6 +187,7 @@ class TargetSpec:
             seen_targets.add(tag.name)
             managed.append(
                 ManagedTag(
+                    display_name=f"tag {tag.name}",
                     source_name=tag.name,
                     target_name=tag.name,
                     protected=tag.protected,
@@ -422,6 +428,7 @@ def inspect_target(target: TargetSpec, policy: BranchPolicy, client: GitLabClien
                     branch_reasons.append(protection_reason)
                     reasons.append(f"{protection_reason}:{branch.target_name}")
                 branch_state[branch.target_name] = {
+                    "label": branch.display_name,
                     "source": branch.source_name,
                     "sha": current_sha,
                     "upstream": branch.upstream,
@@ -462,6 +469,7 @@ def inspect_target(target: TargetSpec, policy: BranchPolicy, client: GitLabClien
                     tag_reasons.append(protection_reason)
                     reasons.append(f"{protection_reason}:{tag.target_name}")
                 tag_state[tag.target_name] = {
+                    "label": tag.display_name,
                     "source": tag.source_name,
                     "sha": current_sha,
                     "upstream": tag.upstream,
@@ -888,6 +896,50 @@ def write_json(path: str, payload: dict[str, Any]) -> None:
     Path(path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _target_summary_name(payload: dict[str, Any]) -> str:
+    target_project_path = str(payload.get("target_project_path") or "").strip()
+    if target_project_path:
+        return target_project_path
+    repo_name = str(payload.get("repo_name") or "").strip()
+    if repo_name:
+        return repo_name
+    return str(payload.get("target_id") or "unknown-target")
+
+
+def _summarize_ref_reasons(items: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    for state in items.values():
+        if not isinstance(state, dict):
+            continue
+        label = str(state.get("label") or "ref").strip()
+        for reason in state.get("reasons", []):
+            if reason == "missing":
+                labels.append(f"{label} missing")
+            elif reason == "sha_diverged":
+                labels.append(f"{label} diverged")
+            elif reason == "protection_missing":
+                labels.append(f"{label} protection missing")
+            elif reason == "protection_present":
+                labels.append(f"{label} protection present")
+            elif reason == "source_missing":
+                labels.append(f"{label} source missing")
+            else:
+                labels.append(f"{label} {reason}")
+    return labels
+
+
+def summarize_target_reasons(payload: dict[str, Any]) -> str:
+    labels: list[str] = []
+    reasons = payload.get("reasons", [])
+    if "project_missing" in reasons:
+        labels.append("project missing")
+    labels.extend(_summarize_ref_reasons(payload.get("branches", {})))
+    labels.extend(_summarize_ref_reasons(payload.get("tags", {})))
+    if any(str(reason).startswith("default_branch_mismatch:") for reason in reasons):
+        labels.append("default branch mismatch")
+    return ", ".join(labels) if labels else "reconcile required"
+
+
 def render_plan_summary(mode: str, inspected: list[dict[str, Any]], errors: list[dict[str, str]]) -> str:
     title = "External" if mode == "external" else "Internal"
     actionable = [item for item in inspected if item.get("needs_reconcile")]
@@ -905,8 +957,7 @@ def render_plan_summary(mode: str, inspected: list[dict[str, Any]], errors: list
         lines.append("### Targets queued for reconcile")
         lines.append("")
         for item in actionable:
-            reasons = ", ".join(item.get("reasons", []))
-            lines.append(f"- `{item['target_id']}`: {reasons}")
+            lines.append(f"- `{_target_summary_name(item)}`: {summarize_target_reasons(item)}")
         lines.append("")
     if errors:
         lines.append("### Inspection errors")
@@ -925,8 +976,9 @@ def render_reconcile_summary(payload: dict[str, Any]) -> str:
     protected = results.get("protected", [])
     unprotected = results.get("unprotected", [])
     lines = [
-        f"## Reconciled `{payload['target_id']}`",
+        f"## Reconciled `{_target_summary_name(payload)}`",
         "",
+        f"- target id: `{payload['target_id']}`",
         f"- mode: `{payload['mode']}`",
         f"- source default branch: `{payload['source_default_branch']}`",
         f"- source sha: `{payload['source_sha']}`",
@@ -976,7 +1028,7 @@ def render_reconcile_batch_summary(
             results = payload.get("results", {})
             lines.append(
                 "- "
-                f"`{payload['target_id']}`: "
+                f"`{_target_summary_name(payload)}`: "
                 f"created={len(results.get('created', []))}, "
                 f"updated={len(results.get('updated', []))}, "
                 f"skipped={len(results.get('skipped', []))}, "

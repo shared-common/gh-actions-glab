@@ -8,6 +8,7 @@ from _common import config_path, load_json_file, require_secret, validate_ref_na
 
 @dataclass(frozen=True)
 class BranchSpec:
+    label: str
     name_env: str
     target_name: str
     protected: bool
@@ -57,6 +58,13 @@ def _load_target_branch(name_env: str, prefix: str, mirror_prefix: str) -> str:
     return target_name
 
 
+def _branch_label(name_env: str) -> str:
+    suffix = name_env.removeprefix("GIT_BRANCH_").strip().lower()
+    if not suffix:
+        raise SystemExit(f"Unable to derive branch label from {name_env}")
+    return suffix
+
+
 def load_branch_policy(path: str | None = None) -> BranchPolicy:
     policy_path = path or config_path("branch-policy.json")
     policy = _require_dict(load_json_file(policy_path, "branch policy"), "branch policy")
@@ -78,6 +86,7 @@ def load_branch_policy(path: str | None = None) -> BranchPolicy:
         seen.add(target_name)
         mirrors.append(
             BranchSpec(
+                label=_branch_label(name_env),
                 name_env=name_env,
                 target_name=target_name,
                 protected=bool(spec.get("protected", False)),
@@ -93,6 +102,7 @@ def load_branch_policy(path: str | None = None) -> BranchPolicy:
         raise SystemExit(f"Duplicate managed branch: {rev_target}")
 
     rev = BranchSpec(
+        label=_branch_label(rev_env),
         name_env=rev_env,
         target_name=rev_target,
         protected=bool(rev_spec.get("protected", False)),

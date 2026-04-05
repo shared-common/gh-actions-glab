@@ -17,10 +17,10 @@ from branch_policy import BranchPolicy, BranchSpec  # noqa: E402
 
 def make_policy() -> BranchPolicy:
     mirrors = (
-        BranchSpec("GIT_BRANCH_RELEASE", "gitlab/mcr/release", True),
-        BranchSpec("GIT_BRANCH_STAGING", "gitlab/mcr/staging", True),
+        BranchSpec("release", "GIT_BRANCH_RELEASE", "gitlab/mcr/release", True),
+        BranchSpec("staging", "GIT_BRANCH_STAGING", "gitlab/mcr/staging", True),
     )
-    rev = BranchSpec("GIT_BRANCH_REV", "gitlab/mcr/rev", True)
+    rev = BranchSpec("rev", "GIT_BRANCH_REV", "gitlab/mcr/rev", True)
     return BranchPolicy(prefix="mcr", mirror_prefix="gitlab", mirrors=mirrors, rev=rev)
 
 
@@ -255,7 +255,21 @@ class GlabSyncTests(unittest.TestCase):
         summary = glab_sync.render_plan_summary(
             "external",
             [
-                {"target_id": "target-111111111111", "target_project_path": "a/b/demo", "source": "https://example/demo", "needs_reconcile": True, "reasons": ["project_missing"]},
+                {
+                    "target_id": "target-111111111111",
+                    "repo_name": "demo",
+                    "target_project_path": "a/b/demo",
+                    "source": "https://example/demo",
+                    "needs_reconcile": True,
+                    "reasons": ["project_missing", "default_branch_mismatch:gitlab/mcr/release"],
+                    "branches": {
+                        "gitlab/mcr/release": {
+                            "label": "release",
+                            "reasons": ["missing", "protection_missing"],
+                        }
+                    },
+                    "tags": {},
+                },
                 {"target_id": "target-222222222222", "target_project_path": "a/b/clean", "source": "https://example/clean", "needs_reconcile": False, "reasons": []},
             ],
             [{"target_id": "target-333333333333", "error": "boom"}],
@@ -263,8 +277,10 @@ class GlabSyncTests(unittest.TestCase):
         self.assertIn("- inspected: 2", summary)
         self.assertIn("- actionable: 1", summary)
         self.assertIn("- errors: 1", summary)
-        self.assertNotIn("a/b/demo", summary)
-        self.assertNotIn("https://example/demo", summary)
+        self.assertIn("a/b/demo", summary)
+        self.assertIn("release missing", summary)
+        self.assertIn("default branch mismatch", summary)
+        self.assertNotIn("target-111111111111", summary)
 
     def test_render_reconcile_summary_redacts_target_identity(self):
         summary = glab_sync.render_reconcile_summary(
@@ -284,8 +300,8 @@ class GlabSyncTests(unittest.TestCase):
                 },
             }
         )
+        self.assertIn("top/sub/demo", summary)
         self.assertIn("target-aaaaaaaaaaaa", summary)
-        self.assertNotIn("top/sub/demo", summary)
         self.assertNotIn("https://gitlab.example/top/demo.git", summary)
 
     def test_load_gitlab_client_uses_mode_specific_secret_names(self):
