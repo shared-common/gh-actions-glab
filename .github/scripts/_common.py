@@ -179,19 +179,30 @@ def validate_https_url(value: str, label: str) -> urllib.parse.ParseResult:
 
 
 def normalize_gitlab_project_url(value: str, label: str) -> str:
-    parsed = validate_https_url(value, label)
-    raw_parts = [part for part in parsed.path.split("/") if part]
-    if len(raw_parts) < 2:
-        raise SystemExit(f"{label} must include at least 2 path segments")
-    parts = list(raw_parts)
-    last = parts[-1]
-    if last.endswith(".git"):
-        last = last[:-4]
-    validate_project_segment(last, label)
-    parts[-1] = last
-    for part in parts[:-1]:
-        validate_project_segment(part, label)
-    return f"https://{parsed.netloc}/{'/'.join(parts)}.git"
+    if not isinstance(value, str) or value.strip() != value or not value:
+        raise SystemExit(f"Invalid {label}")
+
+    scp_like = re.fullmatch(r"[^@\s:]+@[^:\s/]+:.+", value)
+    if scp_like:
+        return value.rstrip("/")
+
+    parsed = urllib.parse.urlparse(value)
+    if not parsed.scheme:
+        raise SystemExit(f"{label} must include a URL scheme")
+    if parsed.scheme not in {"file", "git", "http", "https", "ssh"}:
+        raise SystemExit(f"{label} must use a supported git URL scheme")
+    if parsed.scheme != "file" and not parsed.netloc:
+        raise SystemExit(f"{label} is missing a host")
+    if parsed.password:
+        raise SystemExit(f"{label} must not embed passwords")
+    if parsed.query or parsed.fragment:
+        raise SystemExit(f"{label} must not contain query or fragment components")
+
+    path = parsed.path.rstrip("/")
+    if not path or path == "/":
+        raise SystemExit(f"{label} is missing a repository path")
+
+    return urllib.parse.urlunparse(parsed._replace(path=path))
 
 
 def git_source_head(
