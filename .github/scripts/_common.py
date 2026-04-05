@@ -25,6 +25,7 @@ _SECRET_NAME = re.compile(r"^[A-Z0-9_]+$")
 PROTECTED_BRANCH_PUSH_LEVEL = 40
 PROTECTED_BRANCH_MERGE_LEVEL = 40
 PROTECTED_BRANCH_UNPROTECT_LEVEL = 40
+PROTECTED_TAG_CREATE_LEVEL = 40
 
 
 class ApiError(RuntimeError):
@@ -503,6 +504,17 @@ def get_gitlab_protected_branch(client: GitLabClient, project_id: int, branch: s
     return data if isinstance(data, dict) else None
 
 
+def get_gitlab_protected_tag(client: GitLabClient, project_id: int, tag: str) -> Optional[dict[str, Any]]:
+    encoded = urllib.parse.quote(tag, safe="")
+    try:
+        data = gitlab_request(client, "GET", f"/projects/{project_id}/protected_tags/{encoded}")
+    except ApiError as exc:
+        if exc.status == 404:
+            return None
+        raise
+    return data if isinstance(data, dict) else None
+
+
 def _access_level_set(data: Optional[dict[str, Any]], key: str) -> set[int]:
     if not isinstance(data, dict):
         return set()
@@ -533,6 +545,13 @@ def protected_branch_allows_sync(data: Optional[dict[str, Any]]) -> bool:
     )
 
 
+def protected_tag_allows_sync(data: Optional[dict[str, Any]]) -> bool:
+    if not isinstance(data, dict):
+        return False
+    create_levels = _access_level_set(data, "create_access_levels")
+    return create_levels == {PROTECTED_TAG_CREATE_LEVEL}
+
+
 def ensure_gitlab_protected_branch(client: GitLabClient, project_id: int, branch: str) -> bool:
     current = get_gitlab_protected_branch(client, project_id, branch)
     if protected_branch_allows_sync(current):
@@ -559,6 +578,32 @@ def delete_gitlab_protected_branch(client: GitLabClient, project_id: int, branch
         return False
     encoded = urllib.parse.quote(branch, safe="")
     gitlab_request(client, "DELETE", f"/projects/{project_id}/protected_branches/{encoded}")
+    return True
+
+
+def ensure_gitlab_protected_tag(client: GitLabClient, project_id: int, tag: str) -> bool:
+    current = get_gitlab_protected_tag(client, project_id, tag)
+    if protected_tag_allows_sync(current):
+        return False
+
+    encoded = urllib.parse.quote(tag, safe="")
+    if current:
+        gitlab_request(client, "DELETE", f"/projects/{project_id}/protected_tags/{encoded}")
+
+    payload = {
+        "name": tag,
+        "create_access_level": PROTECTED_TAG_CREATE_LEVEL,
+    }
+    gitlab_request(client, "POST", f"/projects/{project_id}/protected_tags", payload)
+    return True
+
+
+def delete_gitlab_protected_tag(client: GitLabClient, project_id: int, tag: str) -> bool:
+    current = get_gitlab_protected_tag(client, project_id, tag)
+    if not current:
+        return False
+    encoded = urllib.parse.quote(tag, safe="")
+    gitlab_request(client, "DELETE", f"/projects/{project_id}/protected_tags/{encoded}")
     return True
 
 

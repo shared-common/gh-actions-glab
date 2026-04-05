@@ -52,6 +52,16 @@ class CommonTests(unittest.TestCase):
         self.assertFalse(_common.protected_branch_allows_sync(too_open))
         self.assertFalse(_common.protected_branch_allows_sync(wrong_merge))
 
+    def test_protected_tag_allows_sync_requires_exact_policy(self):
+        good = {
+            "create_access_levels": [{"access_level": 40}],
+        }
+        too_open = {
+            "create_access_levels": [{"access_level": 30}, {"access_level": 40}],
+        }
+        self.assertTrue(_common.protected_tag_allows_sync(good))
+        self.assertFalse(_common.protected_tag_allows_sync(too_open))
+
     def test_project_git_url_does_not_embed_credentials(self):
         client = _common.GitLabClient(
             base_url="https://gitlab.com",

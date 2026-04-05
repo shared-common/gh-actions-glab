@@ -17,22 +17,22 @@ class BranchPolicyTests(unittest.TestCase):
     def test_load_branch_policy_builds_managed_refs(self):
         values = {
             "GIT_BRANCH_PREFIX": "mcr",
-            "GIT_BRANCH_MAIN": "main",
+            "GIT_BRANCH_RELEASE": "release",
             "GIT_BRANCH_STAGING": "staging",
-            "GIT_BRANCH_SNAPSHOT": "snapshot",
+            "GIT_BRANCH_REV": "rev",
         }
         with mock.patch.object(branch_policy, "require_secret", side_effect=lambda name: values[name]):
             policy = branch_policy.load_branch_policy()
 
-        self.assertEqual(policy.default_branch, "gitlab/mcr/main")
+        self.assertEqual(policy.default_branch, "gitlab/mcr/release")
         self.assertEqual(
             [item.target_name for item in policy.mirrors],
             [
-                "gitlab/mcr/main",
+                "gitlab/mcr/release",
                 "gitlab/mcr/staging",
             ],
         )
-        self.assertEqual(policy.snapshot.target_name, "mcr/snapshot")
+        self.assertEqual(policy.rev.target_name, "gitlab/mcr/rev")
 
 
 if __name__ == "__main__":

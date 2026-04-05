@@ -1,5 +1,4 @@
 import json
-import os
 import sys
 import tempfile
 import unittest
@@ -18,26 +17,77 @@ from branch_policy import BranchPolicy, BranchSpec  # noqa: E402
 
 def make_policy() -> BranchPolicy:
     mirrors = (
-        BranchSpec("GIT_BRANCH_MAIN", "main", "gitlab/mcr/main", True, True),
-        BranchSpec("GIT_BRANCH_STAGING", "staging", "gitlab/mcr/staging", True, True),
+        BranchSpec("GIT_BRANCH_RELEASE", "gitlab/mcr/release", True),
+        BranchSpec("GIT_BRANCH_STAGING", "gitlab/mcr/staging", True),
     )
-    snapshot = BranchSpec("GIT_BRANCH_SNAPSHOT", "snapshot", "mcr/snapshot", False, False)
-    return BranchPolicy(prefix="mcr", mirror_prefix="gitlab", mirrors=mirrors, snapshot=snapshot)
+    rev = BranchSpec("GIT_BRANCH_REV", "gitlab/mcr/rev", True)
+    return BranchPolicy(prefix="mcr", mirror_prefix="gitlab", mirrors=mirrors, rev=rev)
+
+
+def write_config(payload: dict) -> str:
+    handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False)
+    with handle:
+        json.dump(payload, handle)
+        handle.write("\n")
+    return handle.name
 
 
 class GlabSyncTests(unittest.TestCase):
-    def test_load_targets_external_uses_group_prefix(self):
-        values = {
-            "GL_FORKS_EXT_JSON": '{"keepsecret":"https://invent.kde.org/utilities/keepsecret"}',
-            "GL_GROUP_TOP_UPSTREAM": "top",
-            "GL_GROUP_SUB_MAINLINE": "sub",
-        }
-        with mock.patch.object(glab_sync, "require_secret", side_effect=lambda name: values[name]):
-            targets = glab_sync.load_targets("external")
+    def test_load_targets_external_reads_structured_config(self):
+        path = write_config(
+            {
+                "version": 1,
+                "targets": [
+                    {
+                        "target_project_path": "ghgl-forks/mainline/keepsecret",
+                        "source_url": "https://invent.kde.org/utilities/keepsecret",
+                        "branch_rev": "feature/login",
+                        "branches": [
+                            {"name": "dev/test", "protected": True, "upstream": False},
+                        ],
+                        "tags": [
+                            {"name": "v1.0.0", "protected": True, "upstream": True},
+                        ],
+                    }
+                ],
+            }
+        )
+
+        targets = glab_sync.load_targets("external", path=path)
 
         self.assertEqual(len(targets), 1)
-        self.assertEqual(targets[0].target_project_path, "top/sub/keepsecret")
+        self.assertEqual(targets[0].target_project_path, "ghgl-forks/mainline/keepsecret")
         self.assertEqual(targets[0].source, "https://invent.kde.org/utilities/keepsecret.git")
+        self.assertEqual(targets[0].branch_rev, "feature/login")
+        self.assertEqual(targets[0].branches[0].name, "dev/test")
+        self.assertEqual(targets[0].tags[0].name, "v1.0.0")
+
+    def test_load_targets_internal_reads_structured_config(self):
+        path = write_config(
+            {
+                "version": 1,
+                "targets": [
+                    {
+                        "target_project_path": "glab-forks/system/yodl",
+                        "source_project_path": "fbb-git/yodl",
+                        "branch_rev": "",
+                        "branches": [],
+                        "tags": [],
+                    }
+                ],
+            }
+        )
+
+        targets = glab_sync.load_targets("internal", path=path)
+
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].target_project_path, "glab-forks/system/yodl")
+        self.assertEqual(targets[0].source, "fbb-git/yodl")
+
+    def test_load_targets_rejects_empty_target_list(self):
+        path = write_config({"version": 1, "targets": []})
+        with self.assertRaisesRegex(SystemExit, "must contain at least one target"):
+            glab_sync.load_targets("internal", path=path)
 
     def test_target_spec_requires_repo_name_to_match_target_path(self):
         with self.assertRaises(SystemExit):
@@ -57,28 +107,47 @@ class GlabSyncTests(unittest.TestCase):
                     "mode": "internal",
                     "target_project_path": "top/sub/demo",
                     "source": "top/sub/demo",
-                    "repo_name": "demo",
                 }
             )
 
-    def test_external_payload_normalizes_git_url(self):
+    def test_target_spec_normalizes_external_source_url(self):
         target = glab_sync.TargetSpec.from_payload(
             {
                 "mode": "external",
                 "target_project_path": "top/sub/demo",
                 "source": "https://invent.kde.org/utilities/keepsecret",
-                "repo_name": "demo",
+                "branch_rev": "",
+                "branches": [],
+                "tags": [],
             }
         )
         self.assertEqual(target.source, "https://invent.kde.org/utilities/keepsecret.git")
 
-    def test_load_targets_internal_rejects_empty_mapping(self):
-        values = {
-            "GL_FORKS_INT_JSON": "{}",
-        }
-        with mock.patch.object(glab_sync, "require_secret", side_effect=lambda name: values[name]):
-            with self.assertRaisesRegex(SystemExit, "GL_FORKS_INT_JSON must contain at least one target mapping"):
-                glab_sync.load_targets("internal")
+    def test_managed_branches_include_release_staging_rev_and_extra(self):
+        target = glab_sync.TargetSpec.from_payload(
+            {
+                "mode": "external",
+                "target_project_path": "top/sub/demo",
+                "source": "https://example.com/group/demo",
+                "branch_rev": "feature/login",
+                "branches": [
+                    {"name": "dev/test", "protected": True, "upstream": False},
+                ],
+                "tags": [],
+            }
+        )
+
+        branches = target.managed_branches(make_policy(), "main")
+
+        self.assertEqual(
+            [branch.target_name for branch in branches],
+            [
+                "gitlab/mcr/release",
+                "gitlab/mcr/staging",
+                "gitlab/mcr/rev",
+                "gitlab/mcr/dev/test",
+            ],
+        )
 
     def test_redact_target_context_replaces_target_identifiers(self):
         client = GitLabClient(base_url="https://gitlab.example", username="svc", token="token")
@@ -106,82 +175,81 @@ class GlabSyncTests(unittest.TestCase):
         target = glab_sync.TargetSpec(
             mode="external",
             target_project_path="top/sub/demo",
-            source="https://gitlab.example/group/demo",
+            source="https://gitlab.example/group/demo.git",
             repo_name="demo",
         )
-        with mock.patch.object(glab_sync, "build_source_git_url", return_value="https://gitlab.example/group/demo"):
-            with mock.patch.object(glab_sync, "git_source_head", return_value=("main", "a" * 40)):
-                with mock.patch.object(glab_sync, "get_gitlab_project", return_value=None):
-                    planned = glab_sync.inspect_target(target, make_policy(), client)
+        with mock.patch.object(glab_sync, "git_source_head", return_value=("main", "a" * 40)):
+            with mock.patch.object(glab_sync, "get_gitlab_project", return_value=None):
+                planned = glab_sync.inspect_target(target, make_policy(), client)
 
         self.assertTrue(planned["needs_reconcile"])
         self.assertEqual(planned["reasons"], ["project_missing"])
         self.assertTrue(planned["target_id"].startswith("target-"))
 
-    def test_inspect_target_flags_drift_and_protection(self):
+    def test_inspect_target_flags_branch_drift_tag_drift_and_protection(self):
         client = GitLabClient(base_url="https://gitlab.com", username="svc", token="token")
-        target = glab_sync.TargetSpec(
-            mode="internal",
-            target_project_path="top/sub/demo",
-            source="top/upstream/demo",
-            repo_name="demo",
+        target = glab_sync.TargetSpec.from_payload(
+            {
+                "mode": "internal",
+                "target_project_path": "top/sub/demo",
+                "source": "top/upstream/demo",
+                "branch_rev": "feature/login",
+                "branches": [
+                    {"name": "dev/test", "protected": False, "upstream": False},
+                ],
+                "tags": [
+                    {"name": "v1.0.0", "protected": True, "upstream": True},
+                ],
+            }
         )
-        project = {"id": 77, "default_branch": "main"}
+        project = {"id": 77, "default_branch": "wrong-default"}
+
+        branch_shas = {
+            "gitlab/mcr/release": "b" * 40,
+            "gitlab/mcr/staging": "a" * 40,
+            "gitlab/mcr/rev": None,
+            "gitlab/mcr/dev/test": "c" * 40,
+        }
 
         def branch_sha_side_effect(_client, _project_id, branch):
-            if branch == "gitlab/mcr/main":
-                return "b" * 40
-            if branch == "gitlab/mcr/staging":
-                return "a" * 40
-            if branch == "mcr/snapshot":
+            return branch_shas[branch]
+
+        def remote_ref_side_effect(_remote_url, ref_namespace, ref_name, **_kwargs):
+            lookup = {
+                ("heads", "feature/login"): "d" * 40,
+                ("tags", "v1.0.0"): "e" * 40,
+                ("tags", "v1.0.0-target"): None,
+            }
+            if ref_namespace == "tags" and "top/sub/demo.git" in _remote_url:
                 return None
-            raise AssertionError(f"unexpected branch: {branch}")
-
-        with mock.patch.object(glab_sync, "build_source_git_url", return_value="https://gitlab.com/top/upstream/demo.git"):
-            with mock.patch.object(glab_sync, "git_source_head", return_value=("main", "a" * 40)):
-                with mock.patch.object(glab_sync, "get_gitlab_project", return_value=project):
-                    with mock.patch.object(glab_sync, "get_gitlab_branch_sha", side_effect=branch_sha_side_effect):
-                        with mock.patch("glab_sync.get_gitlab_protected_branch", return_value=None):
-                            planned = glab_sync.inspect_target(target, make_policy(), client)
-
-        self.assertIn("sha_diverged:gitlab/mcr/main", planned["reasons"])
-        self.assertIn("protection_missing:gitlab/mcr/main", planned["reasons"])
-        self.assertIn("branch_missing:mcr/snapshot", planned["reasons"])
-        self.assertIn("default_branch_mismatch:gitlab/mcr/main", planned["reasons"])
-
-    def test_inspect_target_flags_protected_snapshot(self):
-        client = GitLabClient(base_url="https://gitlab.com", username="svc", token="token")
-        target = glab_sync.TargetSpec(
-            mode="internal",
-            target_project_path="top/sub/demo",
-            source="top/upstream/demo",
-            repo_name="demo",
-        )
-        project = {"id": 77, "default_branch": "gitlab/mcr/main"}
-
-        def branch_sha_side_effect(_client, _project_id, branch):
-            if branch == "mcr/snapshot":
-                return "a" * 40
-            return "a" * 40
+            return lookup.get((ref_namespace, ref_name))
 
         def protected_branch_side_effect(_client, _project_id, branch):
-            if branch == "mcr/snapshot":
-                return {"name": "mcr/snapshot"}
-            return {
-                "push_access_levels": [{"access_level": 40}],
-                "merge_access_levels": [{"access_level": 40}],
-                "unprotect_access_levels": [{"access_level": 40}],
-                "allow_force_push": True,
-            }
+            if branch == "gitlab/mcr/dev/test":
+                return {"name": branch}
+            if branch == "gitlab/mcr/staging":
+                return {
+                    "push_access_levels": [{"access_level": 40}],
+                    "merge_access_levels": [{"access_level": 40}],
+                    "unprotect_access_levels": [{"access_level": 40}],
+                    "allow_force_push": True,
+                }
+            return None
 
-        with mock.patch.object(glab_sync, "build_source_git_url", return_value="https://gitlab.com/top/upstream/demo.git"):
-            with mock.patch.object(glab_sync, "git_source_head", return_value=("main", "a" * 40)):
-                with mock.patch.object(glab_sync, "get_gitlab_project", return_value=project):
-                    with mock.patch.object(glab_sync, "get_gitlab_branch_sha", side_effect=branch_sha_side_effect):
+        with mock.patch.object(glab_sync, "git_source_head", return_value=("main", "a" * 40)):
+            with mock.patch.object(glab_sync, "get_gitlab_project", return_value=project):
+                with mock.patch.object(glab_sync, "get_gitlab_branch_sha", side_effect=branch_sha_side_effect):
+                    with mock.patch.object(glab_sync, "git_remote_ref_sha", side_effect=remote_ref_side_effect):
                         with mock.patch("glab_sync.get_gitlab_protected_branch", side_effect=protected_branch_side_effect):
-                            planned = glab_sync.inspect_target(target, make_policy(), client)
+                            with mock.patch("glab_sync.get_gitlab_protected_tag", return_value=None):
+                                planned = glab_sync.inspect_target(target, make_policy(), client)
 
-        self.assertIn("protection_present:mcr/snapshot", planned["reasons"])
+        self.assertIn("sha_diverged:gitlab/mcr/release", planned["reasons"])
+        self.assertIn("branch_missing:gitlab/mcr/rev", planned["reasons"])
+        self.assertIn("protection_present:gitlab/mcr/dev/test", planned["reasons"])
+        self.assertIn("tag_missing:v1.0.0", planned["reasons"])
+        self.assertIn("protection_missing:v1.0.0", planned["reasons"])
+        self.assertIn("default_branch_mismatch:gitlab/mcr/release", planned["reasons"])
 
     def test_render_plan_summary_counts_actionable_items(self):
         summary = glab_sync.render_plan_summary(
@@ -208,7 +276,7 @@ class GlabSyncTests(unittest.TestCase):
                 "source_default_branch": "main",
                 "source_sha": "a" * 40,
                 "results": {
-                    "created": ["gitlab/mcr/main"],
+                    "created": ["gitlab/mcr/release"],
                     "updated": [],
                     "skipped": [],
                     "protected": [],

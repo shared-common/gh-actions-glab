@@ -3,7 +3,7 @@
   "prefixEnv": "GIT_BRANCH_PREFIX",
   "mirrors": [
     {
-      "nameEnv": "GIT_BRANCH_MAIN",
+      "nameEnv": "GIT_BRANCH_RELEASE",
       "protected": true
     },
     {
@@ -11,8 +11,8 @@
       "protected": true
     }
   ],
-  "snapshot": {
-    "nameEnv": "GIT_BRANCH_SNAPSHOT",
-    "protected": false
+  "rev": {
+    "nameEnv": "GIT_BRANCH_REV",
+    "protected": true
   }
 }

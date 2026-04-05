@@ -1,7 +1,9 @@
 # gh-actions-glab
 
 GitHub Actions codebase for syncing public or same-instance GitLab repositories
-into a private GitLab.com top-level group using Bitwarden Secrets Manager.
+into private GitLab targets. Runtime credentials and branch names still come
+from Bitwarden Secrets Manager, but the fork inventory now comes from a checked
+out public config repository.
 
 ## What this repository does
 
@@ -11,40 +13,44 @@ not GitHub-fork-to-GitLab.
 
 It provides:
 
-- `external-sync.yml`: runs at `0 * * * *` and inspects `GL_FORKS_EXT_JSON`
-- `internal-sync.yml`: runs at `30 * * * *` and inspects `GL_FORKS_INT_JSON`
-- `reconcile-target.yml`: reusable workflow that plans and reconciles one sync
-  mode on a single runner
+- `external-sync.yml`: runs at `0 * * * *` and inspects
+  `shared-common/gh-actions-cfg@main:gh-actions-glab/gl_forks_ext.json`
+- `internal-sync.yml`: runs at `30 * * * *` and inspects
+  `shared-common/gh-actions-cfg@main:gh-actions-glab/gl_forks_int.json`
+- `reconcile-target.yml`: reusable workflow that checks out both this repo and
+  `shared-common/gh-actions-cfg`, then plans and reconciles one sync mode on a
+  single runner
 
 The scheduled workflows call `reconcile-target.yml` once per mode. The reusable
 workflow plans first, writes a local redacted reconcile queue, and only runs the
-reconcile phase when one or more targets are missing, when managed branches are
-missing, when the tracked mirror branches drift from the source default branch,
-or when protected branch settings need repair.
+reconcile phase when one or more targets are missing, when managed branches or
+tags are missing, when tracked refs drift from their declared sources, or
+when protected branch or tag settings need repair.
 
 Workflow job names and rendered step summaries use redacted stable target ids
 instead of the actual target project path or target URL.
 
-## Managed branches
+## Managed branches and tags
 
 The branch names come from Bitwarden secrets:
 
 - `GIT_BRANCH_PREFIX`
-- `GIT_BRANCH_MAIN`
+- `GIT_BRANCH_RELEASE`
 - `GIT_BRANCH_STAGING`
-- `GIT_BRANCH_SNAPSHOT`
+- `GIT_BRANCH_REV`
 
 Managed branches are:
 
-- `gitlab/<prefix>/<main>`: tracked, force-syncable, protected
+- `gitlab/<prefix>/<release>`: tracked from the source default branch,
+  force-syncable, protected, and enforced as the GitLab project default branch
 - `gitlab/<prefix>/<staging>`: tracked, force-syncable, protected
-- `<prefix>/<snapshot>`: create once from the initial source default branch,
-  never updated, never protected
-
-If the snapshot branch is later protected by hand, reconciliation removes that
-protection to restore the declared state.
-
-`gitlab/<prefix>/<main>` is also enforced as the GitLab project default branch.
+- `gitlab/<prefix>/<rev>`: optional per-target tracked branch created from a
+  target entry's `branch_rev` source branch, always protected, always updated
+- `gitlab/<prefix>/<branch-name>`: optional per-target branch from the
+  `branches` array; these always use the source branch name from the target
+  entry and always add the `gitlab/<prefix>/` target prefix
+- `<tag-name>`: optional per-target tag from the `tags` array; tags keep their
+  original names and are not prefixed
 
 ## Required GitHub repository variables
 
@@ -62,66 +68,114 @@ Common:
 
 - `GL_BASE_URL`
 - `GIT_BRANCH_PREFIX`
-- `GIT_BRANCH_MAIN`
+- `GIT_BRANCH_RELEASE`
 - `GIT_BRANCH_STAGING`
-- `GIT_BRANCH_SNAPSHOT`
+- `GIT_BRANCH_REV`
 
 External mode:
 
 - `GL_PAT_FORK_SEEDBED_SVC`
 - `GL_BRIDGE_FORK_USER_SEEDBED`
-- `GL_GROUP_TOP_UPSTREAM`
-- `GL_GROUP_SUB_MAINLINE`
-- `GL_FORKS_EXT_JSON`
 
 Internal mode:
 
 - `GL_PAT_FORK_GLAB_SVC`
 - `GL_BRIDGE_FORK_USER_GLAB`
-- `GL_FORKS_INT_JSON`
+
+## Shared config checkout
+
+`reconcile-target.yml` checks out the public repository
+`shared-common/gh-actions-cfg` at ref `main` into `.sync-config/`.
+
+The workflow reads:
+
+- `.sync-config/gh-actions-glab/gl_forks_ext.json` for external mode
+- `.sync-config/gh-actions-glab/gl_forks_int.json` for internal mode
 
 ## Target mapping formats
 
-External mode expects a JSON object whose keys are the target project names and
-whose values are the full source GitLab URLs:
+Both config files use the same top-level structure:
 
 ```json
 {
-  "keepsecret": "https://invent.kde.org/utilities/keepsecret",
-  "switcherooctl": "https://gitlab.freedesktop.org/hadess/switcheroo-control"
+  "version": 1,
+  "targets": [
+    {
+      "target_project_path": "ghgl-forks/mainline/keepsecret",
+      "source_url": "https://invent.kde.org/utilities/keepsecret",
+      "branch_rev": "",
+      "branches": [],
+      "tags": []
+    }
+  ]
 }
 ```
 
-The source URLs may omit `.git`; the workflow normalizes them to Git remote
-URLs before inspection and sync.
+External entries use `source_url` and may omit `.git`; the workflow normalizes
+them to Git remote URLs before inspection and sync.
 
-Projects are created or repaired at:
-
-`GL_GROUP_TOP_UPSTREAM/GL_GROUP_SUB_MAINLINE/<project-name>`
-
-Internal mode expects a JSON object whose keys are the full target project paths
-and whose values are the source project paths on `GL_BASE_URL`:
+Internal entries use `source_project_path` and resolve them against
+`GL_BASE_URL`.
 
 ```json
 {
-  "top/sub1/sub2/project-name": "top/sub1/project-name",
-  "top/sub1/project-name": "top/project"
+  "version": 1,
+  "targets": [
+    {
+      "target_project_path": "glab-forks/system/yodl",
+      "source_project_path": "fbb-git/yodl",
+      "branch_rev": "",
+      "branches": [],
+      "tags": []
+    }
+  ]
 }
 ```
 
-`GL_FORKS_EXT_JSON` and `GL_FORKS_INT_JSON` must be non-empty JSON objects.
-Blank values and empty objects are treated as configuration errors.
+Every target entry supports:
+
+- `target_project_path`: full target project path on `GL_BASE_URL`
+- `source_url` or `source_project_path`: source project location for that mode
+- `branch_rev`: optional source branch name that syncs into
+  `gitlab/<prefix>/<rev>`
+- `branches`: optional array of objects with `name`, `protected`, and
+  `upstream`
+- `tags`: optional array of objects with `name`, `protected`, and `upstream`
+
+For `branches`:
+
+- `name` is the source branch name
+- the target branch is always `gitlab/<prefix>/<name>`
+- `upstream: true` means an existing target branch is force-updated from the
+  source branch
+- `upstream: false` means the target branch is created once if missing and then
+  only its presence and protection state are enforced
+
+For `tags`:
+
+- `name` is both the source tag name and the target tag name
+- tags are never prefixed
+- `upstream: true` means an existing target tag is force-updated from the
+  source tag
+- `upstream: false` means the target tag is created once if missing and then
+  only its presence and protection state are enforced
+
+Both `gl_forks_ext.json` and `gl_forks_int.json` must be valid versioned JSON
+documents with a non-empty `targets` array.
 
 ## Security model
 
 - Bitwarden secrets are written to files under the runner temp directory
 - Every Bitwarden-fetched secret value is masked with `::add-mask::` before
   later steps run
+- The fork inventory is public config checked out from
+  `shared-common/gh-actions-cfg`, not a masked Bitwarden secret blob
 - PATs are never echoed back into logs
 - Git and API calls use bounded retries and explicit timeouts
-- Project and branch names are validated before use
+- Project, branch, and tag names are validated before use
 - Workflow permissions default to `{}` and are narrowed per job
-- Branch protection is repaired only for the managed tracked mirror branches
+- Branch and tag protection are repaired only for refs declared by the target
+  inventory
 
 ## Local validation
 

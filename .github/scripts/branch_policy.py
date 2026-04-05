@@ -9,10 +9,8 @@ from _common import config_path, load_json_file, require_secret, validate_ref_na
 @dataclass(frozen=True)
 class BranchSpec:
     name_env: str
-    source_name: str
     target_name: str
     protected: bool
-    sync: bool
 
 
 @dataclass(frozen=True)
@@ -20,15 +18,17 @@ class BranchPolicy:
     prefix: str
     mirror_prefix: str
     mirrors: tuple[BranchSpec, ...]
-    snapshot: BranchSpec
-
-    @property
-    def all_branches(self) -> tuple[BranchSpec, ...]:
-        return self.mirrors + (self.snapshot,)
+    rev: BranchSpec
 
     @property
     def default_branch(self) -> str:
         return self.mirrors[0].target_name
+
+    def prefixed_branch(self, source_branch: str) -> str:
+        validate_ref_name(source_branch, "source branch")
+        target_name = f"{self.mirror_prefix}/{self.prefix}/{source_branch}"
+        validate_ref_name(target_name, "prefixed target branch")
+        return target_name
 
 
 def _require_dict(value: object, label: str) -> dict:
@@ -49,10 +49,12 @@ def _require_string(value: object, label: str) -> str:
     return value.strip()
 
 
-def _load_branch_name(env_name: str) -> str:
-    branch_name = require_secret(env_name)
-    validate_ref_name(branch_name, env_name)
-    return branch_name
+def _load_target_branch(name_env: str, prefix: str, mirror_prefix: str) -> str:
+    branch_name = require_secret(name_env)
+    validate_ref_name(branch_name, name_env)
+    target_name = f"{mirror_prefix}/{prefix}/{branch_name}"
+    validate_ref_name(target_name, f"{name_env} target ref")
+    return target_name
 
 
 def load_branch_policy(path: str | None = None) -> BranchPolicy:
@@ -70,44 +72,36 @@ def load_branch_policy(path: str | None = None) -> BranchPolicy:
     for item in _require_list(policy.get("mirrors"), "mirrors"):
         spec = _require_dict(item, "mirror entry")
         name_env = _require_string(spec.get("nameEnv"), "mirror.nameEnv")
-        source_name = _load_branch_name(name_env)
-        target_name = f"{mirror_prefix}/{prefix}/{source_name}"
-        validate_ref_name(target_name, f"{name_env} target ref")
+        target_name = _load_target_branch(name_env, prefix, mirror_prefix)
         if target_name in seen:
             raise SystemExit(f"Duplicate managed branch: {target_name}")
         seen.add(target_name)
         mirrors.append(
             BranchSpec(
                 name_env=name_env,
-                source_name=source_name,
                 target_name=target_name,
                 protected=bool(spec.get("protected", False)),
-                sync=True,
             )
         )
     if not mirrors:
         raise SystemExit("Branch policy must define at least one mirror branch")
 
-    snapshot_spec = _require_dict(policy.get("snapshot"), "snapshot")
-    snapshot_env = _require_string(snapshot_spec.get("nameEnv"), "snapshot.nameEnv")
-    snapshot_name = _load_branch_name(snapshot_env)
-    snapshot_target = f"{prefix}/{snapshot_name}"
-    validate_ref_name(snapshot_target, f"{snapshot_env} target ref")
-    if snapshot_target in seen:
-        raise SystemExit(f"Duplicate managed branch: {snapshot_target}")
+    rev_spec = _require_dict(policy.get("rev"), "rev")
+    rev_env = _require_string(rev_spec.get("nameEnv"), "rev.nameEnv")
+    rev_target = _load_target_branch(rev_env, prefix, mirror_prefix)
+    if rev_target in seen:
+        raise SystemExit(f"Duplicate managed branch: {rev_target}")
 
-    snapshot = BranchSpec(
-        name_env=snapshot_env,
-        source_name=snapshot_name,
-        target_name=snapshot_target,
-        protected=bool(snapshot_spec.get("protected", False)),
-        sync=False,
+    rev = BranchSpec(
+        name_env=rev_env,
+        target_name=rev_target,
+        protected=bool(rev_spec.get("protected", False)),
     )
     return BranchPolicy(
         prefix=prefix,
         mirror_prefix=mirror_prefix,
         mirrors=tuple(mirrors),
-        snapshot=snapshot,
+        rev=rev,
     )
 
 
