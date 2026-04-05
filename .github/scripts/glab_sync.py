@@ -619,6 +619,18 @@ def _sync_branch(
     git_env: dict[str, str],
     results: dict[str, list[str]],
 ) -> None:
+    needs_source = branch.upstream or existing_sha is None
+    if needs_source and source_sha is None:
+        results["skipped"].append(f"{branch.target_name} (source missing: {branch.source_name})")
+        if existing_sha is not None:
+            if branch.protected:
+                if ensure_gitlab_protected_branch(client, project_id, branch.target_name):
+                    results["protected"].append(branch.target_name)
+            else:
+                if delete_gitlab_protected_branch(client, project_id, branch.target_name):
+                    results["unprotected"].append(branch.target_name)
+        return
+
     if existing_sha is None:
         outcome = _push_ref(
             repo_path,
@@ -678,6 +690,18 @@ def _sync_tag(
     git_env: dict[str, str],
     results: dict[str, list[str]],
 ) -> None:
+    needs_source = tag.upstream or existing_sha is None
+    if needs_source and source_sha is None:
+        results["skipped"].append(f"tag:{tag.target_name} (source missing: {tag.source_name})")
+        if existing_sha is not None:
+            if tag.protected:
+                if ensure_gitlab_protected_tag(client, project_id, tag.target_name):
+                    results["protected"].append(f"tag:{tag.target_name}")
+            else:
+                if delete_gitlab_protected_tag(client, project_id, tag.target_name):
+                    results["unprotected"].append(f"tag:{tag.target_name}")
+        return
+
     if existing_sha is None:
         outcome = _push_ref(
             repo_path,
@@ -765,8 +789,6 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
                         secrets=secrets,
                         env_overrides=source_env,
                     )
-                if branch_source[branch.source_name] is None:
-                    raise SystemExit(f"source branch missing: {branch.source_name}")
 
         tag_existing: dict[str, str | None] = {
             tag.target_name: git_remote_ref_sha(
@@ -789,8 +811,6 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
                         secrets=secrets,
                         env_overrides=source_env,
                     )
-                if tag_source[tag.source_name] is None:
-                    raise SystemExit(f"source tag missing: {tag.source_name}")
 
         with tempfile.TemporaryDirectory() as repo_dir:
             repo_path = str(Path(repo_dir) / "repo.git")
@@ -819,7 +839,11 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
 
             for branch in branches:
                 needs_source = branch.upstream or branch_existing[branch.target_name] is None
-                if needs_source and branch.source_name not in fetched_branch_sources:
+                if (
+                    needs_source
+                    and branch_source.get(branch.source_name) is not None
+                    and branch.source_name not in fetched_branch_sources
+                ):
                     _fetch_source_ref(
                         repo_path,
                         "source",
@@ -845,7 +869,11 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
 
             for tag in tags:
                 needs_source = tag.upstream or tag_existing[tag.target_name] is None
-                if needs_source and tag.source_name not in fetched_tag_sources:
+                if (
+                    needs_source
+                    and tag_source.get(tag.source_name) is not None
+                    and tag.source_name not in fetched_tag_sources
+                ):
                     _fetch_source_ref(
                         repo_path,
                         "source",
@@ -957,7 +985,7 @@ def render_plan_summary(mode: str, inspected: list[dict[str, Any]], errors: list
         lines.append("### Inspection errors")
         lines.append("")
         for item in errors:
-            lines.append(f"- `{item['target_id']}`: {item['error']}")
+            lines.append(f"- `{_target_summary_name(item)}`: {item['error']}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -1034,6 +1062,6 @@ def render_reconcile_batch_summary(
         lines.append("### Reconcile errors")
         lines.append("")
         for item in errors:
-            lines.append(f"- `{item['target_id']}`: {item['error']}")
+            lines.append(f"- `{_target_summary_name(item)}`: {item['error']}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"

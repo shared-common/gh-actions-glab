@@ -76,6 +76,7 @@ def main() -> int:
             errors.append(
                 {
                     "target_id": target_id,
+                    "target_project_path": target.target_project_path,
                     "error": redact_target_context(str(exc) or "reconcile_failed", target, client),
                 }
             )
