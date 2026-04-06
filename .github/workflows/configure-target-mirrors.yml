@@ -1,5 +1,5 @@
 ---
-name: reconcile-target
+name: configure-target-mirrors
 
 "on":
   workflow_call:
@@ -7,10 +7,6 @@ name: reconcile-target
       mode:
         required: true
         type: string
-    outputs:
-      has_mirror_targets:
-        description: Whether any configured targets define target_mirror_path.
-        value: ${{ jobs.sync.outputs.has_mirror_targets }}
     secrets:
       BWS_ACCESS_TOKEN:
         required: true
@@ -20,13 +16,11 @@ name: reconcile-target
 permissions: {}
 
 jobs:
-  sync:
+  configure:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    outputs:
-      has_mirror_targets: ${{ steps.config_meta.outputs.has_mirror_targets }}
+    timeout-minutes: 60
     concurrency:
-      group: reconcile-${{ inputs.mode }}
+      group: configure-target-mirrors-${{ inputs.mode }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -50,7 +44,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Resolve config path and secret list
+      - name: Resolve mirror config path and BWS secret list
         id: config_meta
         shell: bash
         env:
@@ -69,14 +63,12 @@ jobs:
               exit 1
               ;;
           esac
-          has_mirror_targets="$(python3 -c 'import json, sys; from pathlib import Path; payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")); targets = payload.get("targets", []); print("true" if any(str(item.get("target_mirror_path") or "").strip() for item in targets if isinstance(item, dict)) else "false")' "${config_path}")"
-          printf 'has_mirror_targets=%s\n' "${has_mirror_targets}" >> "${GITHUB_OUTPUT}"
           printf 'secrets=%s\n' \
-            "GL_BASE_URL,GL_PAT_FORK_GLAB_SVC,GL_BRIDGE_FORK_USER_GLAB,GIT_BRANCH_PREFIX,GIT_BRANCH_RELEASE,GIT_BRANCH_STAGING,GIT_BRANCH_REV" \
+            "GL_BASE_URL,GL_PAT_FORK_GLAB_SVC,GL_BRIDGE_FORK_USER_GLAB,GL_USER_FORK_MIRROR_SVC,GL_PAT_FORK_MIRROR_SVC" \
             >> "${GITHUB_OUTPUT}"
           printf 'config_path=%s\n' "${config_path}" >> "${GITHUB_OUTPUT}"
 
-      - name: Fetch reconcile secrets from BWS
+      - name: Fetch mirror secrets from BWS
         uses: >-
           shared-common/gh-actions-shared/.github/actions/bws-fetch@v0.0.41
         with:
@@ -87,7 +79,7 @@ jobs:
           secrets: ${{ steps.config_meta.outputs.secrets }}
           output-dir: .secrets
 
-      - name: Mask fetched reconcile secrets
+      - name: Mask fetched mirror secrets
         shell: bash
         env:
           SECRET_NAMES: ${{ steps.config_meta.outputs.secrets }}
@@ -95,47 +87,24 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/mask_secret_files.py
 
-      - name: Plan sync targets
-        id: plan
+      - name: Configure target mirrors
         shell: bash
         env:
           SYNC_MODE: ${{ inputs.mode }}
-          OUTPUT_PATH: plan.json
-          SUMMARY_PATH: plan.md
+          OUTPUT_PATH: mirrors.json
+          SUMMARY_PATH: mirrors.md
           TARGETS_CONFIG_PATH: ${{ steps.config_meta.outputs.config_path }}
         run: |
           set -euo pipefail
-          python3 .github/scripts/plan_sync.py
+          python3 .github/scripts/configure_target_mirrors.py
 
-      - name: Publish plan summary
+      - name: Publish mirror summary
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f plan.md ]; then
-            cat plan.md >> "${GITHUB_STEP_SUMMARY}"
-          fi
-
-      - name: Reconcile queued targets
-        if: steps.plan.outputs.should_run == 'true'
-        shell: bash
-        env:
-          SYNC_MODE: ${{ inputs.mode }}
-          PLAN_PATH: plan.json
-          OUTPUT_PATH: reconcile.json
-          SUMMARY_PATH: reconcile.md
-          TARGETS_CONFIG_PATH: ${{ steps.config_meta.outputs.config_path }}
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/reconcile_planned_targets.py
-
-      - name: Publish reconcile summary
-        if: always() && steps.plan.outputs.should_run == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f reconcile.md ]; then
-            cat reconcile.md >> "${GITHUB_STEP_SUMMARY}"
+          if [ -f mirrors.md ]; then
+            cat mirrors.md >> "${GITHUB_STEP_SUMMARY}"
           fi
 
       - name: Cleanup secrets

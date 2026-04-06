@@ -40,6 +40,7 @@ class GlabSyncTests(unittest.TestCase):
                 "targets": [
                     {
                         "target_project_path": "ghgl-forks/mainline/keepsecret",
+                        "target_mirror_path": "ghgl-mirror/mainline/keepsecret",
                         "source_url": "https://invent.kde.org/utilities/keepsecret",
                         "branch_rev": "feature/login",
                         "branches": [
@@ -57,7 +58,8 @@ class GlabSyncTests(unittest.TestCase):
 
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0].target_project_path, "ghgl-forks/mainline/keepsecret")
-        self.assertEqual(targets[0].source, "https://invent.kde.org/utilities/keepsecret.git")
+        self.assertEqual(targets[0].target_mirror_path, "ghgl-mirror/mainline/keepsecret")
+        self.assertEqual(targets[0].source, "https://invent.kde.org/utilities/keepsecret")
         self.assertEqual(targets[0].branch_rev, "feature/login")
         self.assertEqual(targets[0].branches[0].name, "dev/test")
         self.assertEqual(targets[0].tags[0].name, "v1.0.0")
@@ -69,6 +71,7 @@ class GlabSyncTests(unittest.TestCase):
                 "targets": [
                     {
                         "target_project_path": "glab-forks/system/yodl",
+                        "target_mirror_path": "",
                         "source_project_path": "fbb-git/yodl",
                         "branch_rev": "",
                         "branches": [],
@@ -82,6 +85,7 @@ class GlabSyncTests(unittest.TestCase):
 
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0].target_project_path, "glab-forks/system/yodl")
+        self.assertEqual(targets[0].target_mirror_path, "")
         self.assertEqual(targets[0].source, "fbb-git/yodl")
 
     def test_load_targets_rejects_empty_target_list(self):
@@ -110,7 +114,7 @@ class GlabSyncTests(unittest.TestCase):
                 }
             )
 
-    def test_target_spec_normalizes_external_source_url(self):
+    def test_target_spec_preserves_external_source_url(self):
         target = glab_sync.TargetSpec.from_payload(
             {
                 "mode": "external",
@@ -121,7 +125,33 @@ class GlabSyncTests(unittest.TestCase):
                 "tags": [],
             }
         )
-        self.assertEqual(target.source, "https://invent.kde.org/utilities/keepsecret.git")
+        self.assertEqual(target.source, "https://invent.kde.org/utilities/keepsecret")
+
+    def test_target_spec_rejects_target_mirror_path_with_dot_git_suffix(self):
+        with self.assertRaisesRegex(SystemExit, "must not include a .git suffix"):
+            glab_sync.TargetSpec.from_payload(
+                {
+                    "mode": "external",
+                    "target_project_path": "top/sub/demo",
+                    "target_mirror_path": "mirror/sub/demo.git",
+                    "source": "https://example.com/group/demo.git",
+                    "branches": [],
+                    "tags": [],
+                }
+            )
+
+    def test_target_spec_rejects_target_mirror_path_self_reference(self):
+        with self.assertRaisesRegex(SystemExit, "must differ from target_project_path"):
+            glab_sync.TargetSpec.from_payload(
+                {
+                    "mode": "external",
+                    "target_project_path": "top/sub/demo",
+                    "target_mirror_path": "top/sub/demo",
+                    "source": "https://example.com/group/demo.git",
+                    "branches": [],
+                    "tags": [],
+                }
+            )
 
     def test_managed_branches_include_release_staging_rev_and_extra(self):
         target = glab_sync.TargetSpec.from_payload(
@@ -315,6 +345,16 @@ class GlabSyncTests(unittest.TestCase):
             internal = glab_sync.load_gitlab_client("internal")
         self.assertEqual((external.username, external.token), ("glab", "glab-token"))
         self.assertEqual((internal.username, internal.token), ("glab", "glab-token"))
+
+    def test_load_mirror_target_client_uses_mirror_secret_names(self):
+        values = {
+            "GL_BASE_URL": "https://gitlab.com",
+            "GL_USER_FORK_MIRROR_SVC": "mirror-user",
+            "GL_PAT_FORK_MIRROR_SVC": "mirror-token",
+        }
+        with mock.patch.object(glab_sync, "require_secret", side_effect=lambda name: values[name]):
+            client = glab_sync.load_mirror_target_client()
+        self.assertEqual((client.username, client.token), ("mirror-user", "mirror-token"))
 
 
 if __name__ == "__main__":

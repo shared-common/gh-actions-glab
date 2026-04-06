@@ -482,6 +482,92 @@ def ensure_gitlab_project(client: GitLabClient, project_path: str) -> tuple[dict
     return created, True
 
 
+def canonicalize_remote_mirror_url(value: str, label: str) -> str:
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme != "https":
+        raise SystemExit(f"{label} must use https")
+    if not parsed.hostname:
+        raise SystemExit(f"{label} is missing a host")
+    if parsed.query or parsed.fragment:
+        raise SystemExit(f"{label} must not contain query or fragment components")
+    path = parsed.path.rstrip("/")
+    if not path or path == "/":
+        raise SystemExit(f"{label} is missing a repository path")
+    host = parsed.hostname.lower()
+    netloc = f"{host}:{parsed.port}" if parsed.port else host
+    return urllib.parse.urlunparse((parsed.scheme.lower(), netloc, path, "", "", ""))
+
+
+def inject_basic_auth_into_url(value: str, username: str, password: str, label: str) -> str:
+    parsed = urllib.parse.urlparse(canonicalize_remote_mirror_url(value, label))
+    host = parsed.hostname or ""
+    netloc = f"{host}:{parsed.port}" if parsed.port else host
+    user_enc = urllib.parse.quote(username, safe="")
+    pass_enc = urllib.parse.quote(password, safe="")
+    return urllib.parse.urlunparse(
+        parsed._replace(netloc=f"{user_enc}:{pass_enc}@{netloc}")
+    )
+
+
+def list_gitlab_remote_mirrors(client: GitLabClient, project_id: int) -> list[dict[str, Any]]:
+    data = gitlab_request(client, "GET", f"/projects/{project_id}/remote_mirrors")
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        raise SystemExit("GitLab remote mirror list returned an invalid response")
+    return [item for item in data if isinstance(item, dict)]
+
+
+def find_gitlab_remote_mirror(
+    mirrors: list[dict[str, Any]],
+    mirror_url: str,
+) -> Optional[dict[str, Any]]:
+    target = canonicalize_remote_mirror_url(mirror_url, "remote mirror url")
+    for item in mirrors:
+        current_url = str(item.get("url") or "").strip()
+        if not current_url:
+            continue
+        try:
+            current = canonicalize_remote_mirror_url(current_url, "remote mirror url")
+        except SystemExit:
+            continue
+        if current == target:
+            return item
+    return None
+
+
+def ensure_gitlab_push_mirror(
+    client: GitLabClient,
+    project_id: int,
+    mirror_url: str,
+    *,
+    enabled: bool = True,
+    only_protected_branches: bool = True,
+    auth_method: str = "password",
+) -> tuple[dict[str, Any], bool]:
+    mirrors = list_gitlab_remote_mirrors(client, project_id)
+    existing = find_gitlab_remote_mirror(mirrors, mirror_url)
+    payload = {
+        "url": mirror_url,
+        "auth_method": auth_method,
+        "enabled": enabled,
+        "only_protected_branches": only_protected_branches,
+    }
+    if existing is None:
+        created = gitlab_request(client, "POST", f"/projects/{project_id}/remote_mirrors", payload)
+        if not isinstance(created, dict):
+            raise SystemExit("GitLab remote mirror create returned an invalid response")
+        return created, True
+
+    mirror_id = existing.get("id")
+    if not isinstance(mirror_id, int):
+        raise SystemExit("GitLab remote mirror response is missing id")
+    updated = gitlab_request(client, "PUT", f"/projects/{project_id}/remote_mirrors/{mirror_id}", payload)
+    if not isinstance(updated, dict):
+        raise SystemExit("GitLab remote mirror update returned an invalid response")
+    return updated, False
+
+
 def get_gitlab_branch(client: GitLabClient, project_id: int, branch: str) -> Optional[dict[str, Any]]:
     encoded = urllib.parse.quote(branch, safe="")
     try:

@@ -67,6 +67,7 @@ class TargetSpec:
     target_project_path: str
     source: str
     repo_name: str
+    target_mirror_path: str = ""
     branches: tuple[NamedSyncSpec, ...] = ()
     tags: tuple[NamedSyncSpec, ...] = ()
     branch_rev: str = ""
@@ -75,6 +76,7 @@ class TargetSpec:
         return {
             "mode": self.mode,
             "target_project_path": self.target_project_path,
+            "target_mirror_path": self.target_mirror_path,
             "source": self.source,
             "repo_name": self.repo_name,
             "branch_rev": self.branch_rev,
@@ -86,6 +88,7 @@ class TargetSpec:
     def from_payload(cls, payload: dict[str, Any]) -> "TargetSpec":
         mode = _require_string(payload.get("mode"), "mode")
         target_project_path = _require_string(payload.get("target_project_path"), "target_project_path")
+        target_mirror_path = str(payload.get("target_mirror_path") or "").strip()
         source = _require_string(payload.get("source"), "source")
         repo_name_raw = str(payload.get("repo_name") or "").strip()
         branch_rev = str(payload.get("branch_rev") or "").strip()
@@ -93,6 +96,12 @@ class TargetSpec:
             raise SystemExit(f"Unsupported sync mode: {mode}")
 
         validate_project_path(target_project_path, "target_project_path")
+        if target_mirror_path:
+            validate_project_path(target_mirror_path, "target_mirror_path")
+            if target_mirror_path.endswith(".git"):
+                raise SystemExit("target_mirror_path must not include a .git suffix")
+            if target_mirror_path == target_project_path:
+                raise SystemExit("target_mirror_path must differ from target_project_path")
         expected_repo_name = target_project_path.rsplit("/", 1)[-1]
         repo_name = repo_name_raw or expected_repo_name
         if repo_name != expected_repo_name:
@@ -114,6 +123,7 @@ class TargetSpec:
         return cls(
             mode=mode,
             target_project_path=target_project_path,
+            target_mirror_path=target_mirror_path,
             source=normalized_source,
             repo_name=repo_name,
             branches=tuple(branches),
@@ -284,6 +294,14 @@ def load_gitlab_client(mode: str) -> GitLabClient:
     )
 
 
+def load_mirror_target_client() -> GitLabClient:
+    return GitLabClient(
+        base_url=require_secret("GL_BASE_URL"),
+        username=require_secret("GL_USER_FORK_MIRROR_SVC"),
+        token=require_secret("GL_PAT_FORK_MIRROR_SVC"),
+    )
+
+
 def load_targets(mode: str, *, path: str | None = None) -> list[TargetSpec]:
     if mode not in {"external", "internal"}:
         raise SystemExit(f"Unsupported sync mode: {mode}")
@@ -309,6 +327,7 @@ def load_targets(mode: str, *, path: str | None = None) -> list[TargetSpec]:
                 entry.get("target_project_path"),
                 f"{label}.targets[{index}].target_project_path",
             ),
+            "target_mirror_path": str(entry.get("target_mirror_path") or "").strip(),
             "source": _require_string(
                 entry.get(source_key),
                 f"{label}.targets[{index}].{source_key}",
