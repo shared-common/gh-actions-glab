@@ -13,6 +13,7 @@ from _common import (
     inject_basic_auth_into_url,
     require_env,
     sanitize,
+    sync_gitlab_remote_mirror,
 )
 from glab_sync import load_gitlab_client, load_mirror_target_client, load_targets, write_json
 
@@ -34,11 +35,13 @@ def render_mirror_summary(
         lines.append("### Configured mirror targets")
         lines.append("")
         for item in configured:
+            sync_triggered = bool(item.get("remote_mirror_sync_triggered"))
             lines.append(
                 "- "
                 f"`{item['target_project_path']}` -> `{item['target_mirror_path']}`: "
                 f"mirror project created={'yes' if item['mirror_project_created'] else 'no'}, "
-                f"remote mirror={'created' if item['remote_mirror_created'] else 'updated'}"
+                f"remote mirror={'created' if item['remote_mirror_created'] else 'updated'}, "
+                f"forced sync={'yes' if sync_triggered else 'no'}"
             )
         lines.append("")
     if errors:
@@ -83,7 +86,7 @@ def main() -> int:
                 mirror_client.token,
                 "target mirror url",
             )
-            _, remote_mirror_created = ensure_gitlab_push_mirror(
+            remote_mirror, remote_mirror_created = ensure_gitlab_push_mirror(
                 source_client,
                 project_id,
                 authenticated_mirror_url,
@@ -91,12 +94,19 @@ def main() -> int:
                 only_protected_branches=True,
                 auth_method="password",
             )
+            remote_mirror_id = remote_mirror.get("id")
+            if not isinstance(remote_mirror_id, int):
+                raise SystemExit("GitLab remote mirror response is missing id")
+            mirror_should_sync = mirror_project_created or remote_mirror_created
+            if mirror_should_sync:
+                sync_gitlab_remote_mirror(source_client, project_id, remote_mirror_id)
             configured.append(
                 {
                     "target_project_path": target.target_project_path,
                     "target_mirror_path": target.target_mirror_path,
                     "mirror_project_created": mirror_project_created,
                     "remote_mirror_created": remote_mirror_created,
+                    "remote_mirror_sync_triggered": mirror_should_sync,
                 }
             )
         except (ApiError, SystemExit) as exc:

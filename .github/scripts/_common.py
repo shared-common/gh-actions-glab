@@ -568,6 +568,10 @@ def ensure_gitlab_push_mirror(
     return updated, False
 
 
+def sync_gitlab_remote_mirror(client: GitLabClient, project_id: int, mirror_id: int) -> None:
+    gitlab_request(client, "POST", f"/projects/{project_id}/remote_mirrors/{mirror_id}/sync")
+
+
 def get_gitlab_branch(client: GitLabClient, project_id: int, branch: str) -> Optional[dict[str, Any]]:
     encoded = urllib.parse.quote(branch, safe="")
     try:

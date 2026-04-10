@@ -128,6 +128,20 @@ class CommonTests(unittest.TestCase):
             },
         )
 
+    def test_sync_gitlab_remote_mirror_posts_sync_endpoint(self):
+        client = _common.GitLabClient(
+            base_url="https://gitlab.com",
+            username="svc-user",
+            token="secret-token",
+        )
+        with unittest.mock.patch.object(_common, "gitlab_request", return_value=None) as request:
+            _common.sync_gitlab_remote_mirror(client, 42, 15)
+        request.assert_called_once_with(
+            client,
+            "POST",
+            "/projects/42/remote_mirrors/15/sync",
+        )
+
     def test_protected_branch_allows_sync_requires_exact_policy(self):
         good = {
             "push_access_levels": [{"access_level": 40}],

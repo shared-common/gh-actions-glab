@@ -109,6 +109,13 @@ Both config files use the same top-level structure:
 External entries use `source_url` and may omit `.git`; the workflow normalizes
 them to Git remote URLs before inspection and sync.
 
+When a target in either `gl_forks_ext.json` or `gl_forks_int.json` sets
+`target_mirror_path`, the follow-up mirror configuration workflow creates the
+target mirror project if needed, ensures the push mirror exists on the source
+`target_project_path`, and force-triggers a push mirror sync with
+`POST /projects/:id/remote_mirrors/:mirror_id/sync` when the mirror target
+project or remote mirror configuration was newly created.
+
 Internal entries use `source_project_path` and resolve them against
 `GL_BASE_URL`.
 
