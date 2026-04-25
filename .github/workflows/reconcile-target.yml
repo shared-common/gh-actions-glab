@@ -72,7 +72,7 @@ jobs:
           has_mirror_targets="$(python3 -c 'import json, sys; from pathlib import Path; payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")); targets = payload.get("targets", []); print("true" if any(str(item.get("target_mirror_path") or "").strip() for item in targets if isinstance(item, dict)) else "false")' "${config_path}")"
           printf 'has_mirror_targets=%s\n' "${has_mirror_targets}" >> "${GITHUB_OUTPUT}"
           printf 'secrets=%s\n' \
-            "GL_BASE_URL,GL_PAT_FORK_GLAB_SVC,GL_BRIDGE_FORK_USER_GLAB,GIT_BRANCH_PREFIX,GIT_BRANCH_RELEASE,GIT_BRANCH_STAGING,GIT_BRANCH_REV" \
+            "GL_BASE_URL,GL_PAT_FORK_GLAB_SVC,GL_BRIDGE_FORK_USER_GLAB,GIT_BRANCH_PREFIX,GIT_BRANCH_MAIN,GIT_BRANCH_STAGING,GIT_BRANCH_RELEASE,GIT_BRANCH_REV" \
             >> "${GITHUB_OUTPUT}"
           printf 'config_path=%s\n' "${config_path}" >> "${GITHUB_OUTPUT}"
 

@@ -17,8 +17,9 @@ from branch_policy import BranchPolicy, BranchSpec  # noqa: E402
 
 def make_policy() -> BranchPolicy:
     mirrors = (
-        BranchSpec("release", "GIT_BRANCH_RELEASE", "gitlab/mcr/release", True),
+        BranchSpec("main", "GIT_BRANCH_MAIN", "gitlab/mcr/main", True),
         BranchSpec("staging", "GIT_BRANCH_STAGING", "gitlab/mcr/staging", True),
+        BranchSpec("release", "GIT_BRANCH_RELEASE", "gitlab/mcr/release", True),
     )
     rev = BranchSpec("rev", "GIT_BRANCH_REV", "gitlab/mcr/rev", True)
     return BranchPolicy(prefix="mcr", mirror_prefix="gitlab", mirrors=mirrors, rev=rev)
@@ -153,7 +154,7 @@ class GlabSyncTests(unittest.TestCase):
                 }
             )
 
-    def test_managed_branches_include_release_staging_rev_and_extra(self):
+    def test_managed_branches_include_main_staging_release_rev_and_extra(self):
         target = glab_sync.TargetSpec.from_payload(
             {
                 "mode": "external",
@@ -172,8 +173,9 @@ class GlabSyncTests(unittest.TestCase):
         self.assertEqual(
             [branch.target_name for branch in branches],
             [
-                "gitlab/mcr/release",
+                "gitlab/mcr/main",
                 "gitlab/mcr/staging",
+                "gitlab/mcr/release",
                 "gitlab/mcr/rev",
                 "gitlab/mcr/dev/test",
             ],
@@ -235,8 +237,9 @@ class GlabSyncTests(unittest.TestCase):
         project = {"id": 77, "default_branch": "wrong-default"}
 
         branch_shas = {
-            "gitlab/mcr/release": "b" * 40,
+            "gitlab/mcr/main": "b" * 40,
             "gitlab/mcr/staging": "a" * 40,
+            "gitlab/mcr/release": "a" * 40,
             "gitlab/mcr/rev": None,
             "gitlab/mcr/dev/test": "c" * 40,
         }
@@ -274,12 +277,12 @@ class GlabSyncTests(unittest.TestCase):
                             with mock.patch("glab_sync.get_gitlab_protected_tag", return_value=None):
                                 planned = glab_sync.inspect_target(target, make_policy(), client)
 
-        self.assertIn("sha_diverged:gitlab/mcr/release", planned["reasons"])
+        self.assertIn("sha_diverged:gitlab/mcr/main", planned["reasons"])
         self.assertIn("branch_missing:gitlab/mcr/rev", planned["reasons"])
         self.assertIn("protection_present:gitlab/mcr/dev/test", planned["reasons"])
         self.assertIn("tag_missing:v1.0.0", planned["reasons"])
         self.assertIn("protection_missing:v1.0.0", planned["reasons"])
-        self.assertIn("default_branch_mismatch:gitlab/mcr/release", planned["reasons"])
+        self.assertIn("default_branch_mismatch:gitlab/mcr/main", planned["reasons"])
 
     def test_render_plan_summary_counts_actionable_items(self):
         summary = glab_sync.render_plan_summary(
@@ -291,10 +294,10 @@ class GlabSyncTests(unittest.TestCase):
                     "target_project_path": "a/b/demo",
                     "source": "https://example/demo",
                     "needs_reconcile": True,
-                    "reasons": ["project_missing", "default_branch_mismatch:gitlab/mcr/release"],
+                    "reasons": ["project_missing", "default_branch_mismatch:gitlab/mcr/main"],
                     "branches": {
-                        "gitlab/mcr/release": {
-                            "label": "release",
+                        "gitlab/mcr/main": {
+                            "label": "main",
                             "reasons": ["missing", "protection_missing"],
                         }
                     },
@@ -308,7 +311,7 @@ class GlabSyncTests(unittest.TestCase):
         self.assertIn("- actionable: 1", summary)
         self.assertIn("- errors: 1", summary)
         self.assertIn("a/b/demo", summary)
-        self.assertIn("release missing", summary)
+        self.assertIn("main missing", summary)
         self.assertIn("default branch mismatch", summary)
         self.assertNotIn("target-111111111111", summary)
 
@@ -322,7 +325,7 @@ class GlabSyncTests(unittest.TestCase):
                 "source_default_branch": "main",
                 "source_sha": "a" * 40,
                 "results": {
-                    "created": ["gitlab/mcr/release"],
+                    "created": ["gitlab/mcr/main"],
                     "updated": [],
                     "skipped": [],
                     "protected": [],

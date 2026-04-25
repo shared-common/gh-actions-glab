@@ -35,15 +35,17 @@ instead of the actual target project path or target URL.
 The branch names come from Bitwarden secrets:
 
 - `GIT_BRANCH_PREFIX`
-- `GIT_BRANCH_RELEASE`
+- `GIT_BRANCH_MAIN`
 - `GIT_BRANCH_STAGING`
+- `GIT_BRANCH_RELEASE`
 - `GIT_BRANCH_REV`
 
 Managed branches are:
 
-- `gitlab/<prefix>/<release>`: tracked from the source default branch,
+- `gitlab/<prefix>/<main>`: tracked from the source default branch,
   force-syncable, protected, and enforced as the GitLab project default branch
 - `gitlab/<prefix>/<staging>`: tracked, force-syncable, protected
+- `gitlab/<prefix>/<release>`: tracked, force-syncable, protected
 - `gitlab/<prefix>/<rev>`: optional per-target tracked branch created from a
   target entry's `branch_rev` source branch, always protected, always updated
 - `gitlab/<prefix>/<branch-name>`: optional per-target branch from the
@@ -68,8 +70,9 @@ Common:
 
 - `GL_BASE_URL`
 - `GIT_BRANCH_PREFIX`
-- `GIT_BRANCH_RELEASE`
+- `GIT_BRANCH_MAIN`
 - `GIT_BRANCH_STAGING`
+- `GIT_BRANCH_RELEASE`
 - `GIT_BRANCH_REV`
 
 External mode:
