@@ -1216,15 +1216,7 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
             )
         except SystemExit as exc:
             error_text = str(exc) or "reconcile_failed"
-            only_project_created = (
-                results["created"] == [f"project:{target.target_project_path}"]
-                and not results["updated"]
-                and not results["skipped"]
-                and not results["protected"]
-                and not results["pruned"]
-                and not results["unprotected"]
-            )
-            if target.mode != "internal" or not created or not only_project_created or not _should_use_import_fallback(error_text):
+            if target.mode != "internal" or not created or not _should_use_import_fallback(error_text):
                 raise
             project, _ = _fallback_import_internal_target_project(
                 client,

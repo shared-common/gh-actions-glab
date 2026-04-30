@@ -605,6 +605,47 @@ class GlabSyncTests(unittest.TestCase):
         prune_refs.assert_called_once()
         self.assertIn("seed:import_fallback", payload["results"]["updated"])
 
+    def test_reconcile_target_uses_import_fallback_after_partial_seed_then_413(self):
+        client = GitLabClient(base_url="https://gitlab.example", username="svc", token="token")
+        target = glab_sync.TargetSpec(
+            mode="internal",
+            target_project_path="glab-forks/team/demo",
+            source="kalilinux/demo",
+            repo_name="demo",
+        )
+
+        with mock.patch.object(glab_sync, "git_source_head", return_value=("main", "a" * 40)):
+            with mock.patch.object(
+                glab_sync,
+                "git_askpass_env",
+                return_value=contextlib.nullcontext({"GIT_ASKPASS": "/tmp/askpass"}),
+            ):
+                with mock.patch.object(glab_sync, "ensure_gitlab_project", return_value=({"id": 77}, True)):
+                    def sync_side_effect(*args, **kwargs):
+                        results = kwargs["results"]
+                        if not results["updated"] and "gitlab/mcr/main" not in results["created"]:
+                            results["created"].append("gitlab/mcr/main")
+                            raise SystemExit(
+                                "error: RPC failed; HTTP 413 curl 22 The requested URL returned error: 413"
+                            )
+                        return None
+
+                    with mock.patch.object(glab_sync, "_sync_target_refs", side_effect=sync_side_effect) as sync_refs:
+                        with mock.patch.object(
+                            glab_sync,
+                            "_fallback_import_internal_target_project",
+                            return_value=({"id": 77, "import_status": "finished"}, True),
+                        ) as import_fallback:
+                            with mock.patch.object(glab_sync, "ensure_gitlab_default_branch", return_value=False):
+                                with mock.patch.object(glab_sync, "_prune_imported_internal_refs") as prune_refs:
+                                    payload = glab_sync.reconcile_target(target, make_policy(), client)
+
+        self.assertEqual(sync_refs.call_count, 2)
+        import_fallback.assert_called_once()
+        prune_refs.assert_called_once()
+        self.assertIn("gitlab/mcr/main", payload["results"]["created"])
+        self.assertIn("seed:import_fallback", payload["results"]["updated"])
+
     def test_reconcile_target_prunes_existing_imported_internal_projects(self):
         client = GitLabClient(base_url="https://gitlab.example", username="svc", token="token")
         target = glab_sync.TargetSpec(
