@@ -69,6 +69,7 @@ class TargetSpec:
     repo_name: str
     target_mirror_path: str = ""
     git_lfs: bool | None = None
+    git_timeout_seconds: int = 300
     branches: tuple[NamedSyncSpec, ...] = ()
     tags: tuple[NamedSyncSpec, ...] = ()
     branch_rev: str = ""
@@ -81,6 +82,7 @@ class TargetSpec:
             "source": self.source,
             "repo_name": self.repo_name,
             "git_lfs": self.git_lfs,
+            "git_timeout_seconds": self.git_timeout_seconds,
             "branch_rev": self.branch_rev,
             "branches": [item.__dict__ for item in self.branches],
             "tags": [item.__dict__ for item in self.tags],
@@ -94,6 +96,7 @@ class TargetSpec:
         source = _require_string(payload.get("source"), "source")
         repo_name_raw = str(payload.get("repo_name") or "").strip()
         git_lfs = _require_optional_bool(payload.get("git_lfs"), "git_lfs")
+        git_timeout_seconds = _require_optional_int(payload.get("git_timeout_seconds"), "git_timeout_seconds") or 300
         branch_rev = str(payload.get("branch_rev") or "").strip()
         if mode not in {"external", "internal"}:
             raise SystemExit(f"Unsupported sync mode: {mode}")
@@ -130,6 +133,7 @@ class TargetSpec:
             source=normalized_source,
             repo_name=repo_name,
             git_lfs=git_lfs,
+            git_timeout_seconds=git_timeout_seconds,
             branches=tuple(branches),
             tags=tuple(tags),
             branch_rev=branch_rev,
@@ -228,6 +232,16 @@ def _require_optional_bool(value: object, label: str) -> bool | None:
         return None
     if not isinstance(value, bool):
         raise SystemExit(f"{label} must be a boolean when set")
+    return value
+
+
+def _require_optional_int(value: object, label: str, *, minimum: int = 60, maximum: int = 7200) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise SystemExit(f"{label} must be an integer when set")
+    if value < minimum or value > maximum:
+        raise SystemExit(f"{label} must be between {minimum} and {maximum}")
     return value
 
 
@@ -345,6 +359,7 @@ def load_targets(mode: str, *, path: str | None = None) -> list[TargetSpec]:
                 f"{label}.targets[{index}].{source_key}",
             ),
             "git_lfs": entry.get("git_lfs"),
+            "git_timeout_seconds": entry.get("git_timeout_seconds"),
             "branch_rev": str(entry.get("branch_rev") or "").strip(),
             "branches": entry.get("branches", []),
             "tags": entry.get("tags", []),
@@ -530,6 +545,7 @@ def _fetch_source_ref(
     ref_namespace: str,
     ref_name: str,
     *,
+    timeout_seconds: int,
     secrets: tuple[str, ...],
     env_overrides: dict[str, str] | None,
 ) -> None:
@@ -544,7 +560,7 @@ def _fetch_source_ref(
             f"refs/{ref_namespace}/{ref_name}:refs/{ref_namespace}/{ref_name}",
         ],
         secrets=secrets,
-        timeout=300,
+        timeout=timeout_seconds,
         env_overrides=env_overrides,
     )
 
@@ -616,6 +632,7 @@ def _push_ref(
     expected_remote_sha: str | None,
     allow_existing: bool = False,
     git_lfs_enabled: bool = False,
+    timeout_seconds: int = 300,
     secrets: tuple[str, ...] = (),
     env_overrides: dict[str, str] | None = None,
 ) -> str:
@@ -630,11 +647,11 @@ def _push_ref(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=300,
+                timeout=timeout_seconds,
                 env=env,
             )
         except subprocess.TimeoutExpired as exc:
-            raise SystemExit(f"Command timed out after 300s: {command_text}") from exc
+            raise SystemExit(f"Command timed out after {timeout_seconds}s: {command_text}") from exc
 
     source_refspec = f"refs/{ref_namespace}/{source_ref}"
     target_refspec = f"refs/{ref_namespace}/{target_ref}"
@@ -642,13 +659,13 @@ def _push_ref(
         run_command(
             ["git", "-C", repo_path, "lfs", "fetch", source_remote, source_refspec],
             secrets=secrets,
-            timeout=300,
+            timeout=timeout_seconds,
             env_overrides=env_overrides,
         )
         run_command(
             ["git", "-C", repo_path, "lfs", "push", target_remote, source_refspec],
             secrets=secrets,
-            timeout=300,
+            timeout=timeout_seconds,
             env_overrides=env_overrides,
         )
 
@@ -706,6 +723,7 @@ def _sync_branch(
     existing_sha: str | None,
     source_sha: str | None,
     git_lfs_enabled: bool,
+    git_timeout_seconds: int,
     secrets: tuple[str, ...],
     git_env: dict[str, str],
     results: dict[str, list[str]],
@@ -735,6 +753,7 @@ def _sync_branch(
             expected_remote_sha=None,
             allow_existing=True,
             git_lfs_enabled=git_lfs_enabled,
+            timeout_seconds=git_timeout_seconds,
             secrets=secrets,
             env_overrides=git_env,
         )
@@ -754,6 +773,7 @@ def _sync_branch(
                 target_remote="target",
                 expected_remote_sha=existing_sha,
                 git_lfs_enabled=git_lfs_enabled,
+                timeout_seconds=git_timeout_seconds,
                 secrets=secrets,
                 env_overrides=git_env,
             )
@@ -780,6 +800,7 @@ def _sync_tag(
     existing_sha: str | None,
     source_sha: str | None,
     git_lfs_enabled: bool,
+    git_timeout_seconds: int,
     secrets: tuple[str, ...],
     git_env: dict[str, str],
     results: dict[str, list[str]],
@@ -809,6 +830,7 @@ def _sync_tag(
             expected_remote_sha=None,
             allow_existing=True,
             git_lfs_enabled=git_lfs_enabled,
+            timeout_seconds=git_timeout_seconds,
             secrets=secrets,
             env_overrides=git_env,
         )
@@ -828,6 +850,7 @@ def _sync_tag(
                 target_remote="target",
                 expected_remote_sha=existing_sha,
                 git_lfs_enabled=git_lfs_enabled,
+                timeout_seconds=git_timeout_seconds,
                 secrets=secrets,
                 env_overrides=git_env,
             )
@@ -938,6 +961,7 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
                         "source",
                         "heads",
                         branch.source_name,
+                        timeout_seconds=target.git_timeout_seconds,
                         secrets=secrets,
                         env_overrides=source_env,
                     )
@@ -955,6 +979,7 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
                         "source",
                         "tags",
                         tag.source_name,
+                        timeout_seconds=target.git_timeout_seconds,
                         secrets=secrets,
                         env_overrides=source_env,
                     )
@@ -991,6 +1016,7 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
                     existing_sha=branch_existing[branch.target_name],
                     source_sha=branch_source.get(branch.source_name),
                     git_lfs_enabled=git_lfs_enabled,
+                    git_timeout_seconds=target.git_timeout_seconds,
                     secrets=secrets,
                     git_env=git_env,
                     results=results,
@@ -1007,6 +1033,7 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
                     existing_sha=tag_existing[tag.target_name],
                     source_sha=tag_source.get(tag.source_name),
                     git_lfs_enabled=git_lfs_enabled,
+                    git_timeout_seconds=target.git_timeout_seconds,
                     secrets=secrets,
                     git_env=git_env,
                     results=results,

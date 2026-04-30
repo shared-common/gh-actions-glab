@@ -102,6 +102,7 @@ Both config files use the same top-level structure:
       "target_project_path": "ghgl-forks/mainline/keepsecret",
       "source_url": "https://invent.kde.org/utilities/keepsecret",
       "git_lfs": true,
+      "git_timeout_seconds": 900,
       "branch_rev": "",
       "branches": [],
       "tags": []
@@ -131,6 +132,7 @@ Internal entries use `source_project_path` and resolve them against
       "target_project_path": "glab-forks/system/yodl",
       "source_project_path": "fbb-git/yodl",
       "git_lfs": false,
+      "git_timeout_seconds": 600,
       "branch_rev": "",
       "branches": [],
       "tags": []
@@ -146,6 +148,8 @@ Every target entry supports:
 - `git_lfs`: optional boolean override; when omitted the workflow inspects the
   fetched source refs and enables Git LFS only when the target declares LFS
   usage in `.gitattributes` or `.lfsconfig`
+- `git_timeout_seconds`: optional integer override for long-running fetch and
+  push operations; defaults to `300` and must be between `60` and `7200`
 - `branch_rev`: optional source branch name that syncs into
   `gitlab/<prefix>/<rev>`
 - `branches`: optional array of objects with `name`, `protected`, and

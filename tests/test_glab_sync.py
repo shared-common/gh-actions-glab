@@ -45,6 +45,7 @@ class GlabSyncTests(unittest.TestCase):
                         "target_mirror_path": "ghgl-mirror/mainline/keepsecret",
                         "source_url": "https://invent.kde.org/utilities/keepsecret",
                         "git_lfs": True,
+                        "git_timeout_seconds": 900,
                         "branch_rev": "feature/login",
                         "branches": [
                             {"name": "dev/test", "protected": True, "upstream": False},
@@ -64,6 +65,7 @@ class GlabSyncTests(unittest.TestCase):
         self.assertEqual(targets[0].target_mirror_path, "ghgl-mirror/mainline/keepsecret")
         self.assertEqual(targets[0].source, "https://invent.kde.org/utilities/keepsecret")
         self.assertTrue(targets[0].git_lfs)
+        self.assertEqual(targets[0].git_timeout_seconds, 900)
         self.assertEqual(targets[0].branch_rev, "feature/login")
         self.assertEqual(targets[0].branches[0].name, "dev/test")
         self.assertEqual(targets[0].tags[0].name, "v1.0.0")
@@ -78,6 +80,7 @@ class GlabSyncTests(unittest.TestCase):
                         "target_mirror_path": "",
                         "source_project_path": "fbb-git/yodl",
                         "git_lfs": False,
+                        "git_timeout_seconds": 600,
                         "branch_rev": "",
                         "branches": [],
                         "tags": [],
@@ -93,6 +96,7 @@ class GlabSyncTests(unittest.TestCase):
         self.assertEqual(targets[0].target_mirror_path, "")
         self.assertEqual(targets[0].source, "fbb-git/yodl")
         self.assertFalse(targets[0].git_lfs)
+        self.assertEqual(targets[0].git_timeout_seconds, 600)
 
     def test_load_targets_rejects_empty_target_list(self):
         path = write_config({"version": 1, "targets": []})
@@ -141,6 +145,19 @@ class GlabSyncTests(unittest.TestCase):
                     "target_project_path": "top/sub/demo",
                     "source": "https://example.com/group/demo.git",
                     "git_lfs": "true",
+                    "branches": [],
+                    "tags": [],
+                }
+            )
+
+    def test_target_spec_rejects_invalid_git_timeout_seconds(self):
+        with self.assertRaisesRegex(SystemExit, "git_timeout_seconds must be between 60 and 7200"):
+            glab_sync.TargetSpec.from_payload(
+                {
+                    "mode": "external",
+                    "target_project_path": "top/sub/demo",
+                    "source": "https://example.com/group/demo.git",
+                    "git_timeout_seconds": 30,
                     "branches": [],
                     "tags": [],
                 }
@@ -435,12 +452,16 @@ class GlabSyncTests(unittest.TestCase):
                     source_remote="source",
                     target_remote="target",
                     expected_remote_sha=None,
+                    timeout_seconds=900,
                     git_lfs_enabled=True,
                 )
         self.assertEqual(outcome, "updated")
         self.assertEqual(run_command.call_count, 2)
         self.assertEqual(run_command.call_args_list[0].args[0][3:5], ["lfs", "fetch"])
         self.assertEqual(run_command.call_args_list[1].args[0][3:5], ["lfs", "push"])
+        self.assertEqual(run_command.call_args_list[0].kwargs["timeout"], 900)
+        self.assertEqual(run_command.call_args_list[1].kwargs["timeout"], 900)
+        self.assertEqual(push_envs[0]["GIT_TERMINAL_PROMPT"], "0")
         self.assertEqual(push_envs[0]["GIT_LFS_SKIP_PUSH"], "1")
 
 
