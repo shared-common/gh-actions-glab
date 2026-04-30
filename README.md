@@ -128,19 +128,19 @@ When an internal target project does not exist yet, the workflow first creates
 an empty private project with `shared_runners_enabled` forced to `false` and
 then reconciles only the declared managed refs from the config.
 
-If the first managed-ref seed push for a newly created internal target fails
-with an HTTP `413`-class transport error, the workflow falls back to
-`import_url` for that target only, waits for the server-side import to finish,
-and then prunes every imported branch and tag that is not part of the declared
-managed ref set.
+If a target sets `source_import: true`, the workflow seeds that target with a
+full-project `import_url` import before it reconciles the managed refs. Those
+opt-in import targets do not prune unmanaged imported refs.
 
 ```json
 {
   "version": 1,
   "targets": [
-    {
-      "target_project_path": "glab-forks/system/yodl",
-      "source_project_path": "fbb-git/yodl",
+      {
+        "target_project_path": "glab-forks/system/yodl",
+        "target_mirror_path": "workyard/glab-forks/system/yodl",
+        "source_project_path": "fbb-git/yodl",
+        "source_import": false,
       "git_lfs": false,
       "git_timeout_seconds": 600,
       "branch_rev": "",
@@ -155,6 +155,10 @@ Every target entry supports:
 
 - `target_project_path`: full target project path on `GL_BASE_URL`
 - `source_url` or `source_project_path`: source project location for that mode
+- `target_mirror_path`: optional mirror project path used by the follow-up
+  target-mirror workflow
+- `source_import`: optional boolean; when `true`, seed the target with a
+  full-project import before managed-ref reconciliation
 - `git_lfs`: optional boolean override; when omitted the workflow inspects the
   fetched source refs and enables Git LFS only when the target declares LFS
   usage in `.gitattributes` or `.lfsconfig`

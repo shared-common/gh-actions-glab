@@ -76,6 +76,7 @@ class TargetSpec:
     source: str
     repo_name: str
     target_mirror_path: str = ""
+    source_import: bool = False
     git_lfs: bool | None = None
     git_timeout_seconds: int = 300
     branches: tuple[NamedSyncSpec, ...] = ()
@@ -89,6 +90,7 @@ class TargetSpec:
             "target_mirror_path": self.target_mirror_path,
             "source": self.source,
             "repo_name": self.repo_name,
+            "source_import": self.source_import,
             "git_lfs": self.git_lfs,
             "git_timeout_seconds": self.git_timeout_seconds,
             "branch_rev": self.branch_rev,
@@ -103,6 +105,7 @@ class TargetSpec:
         target_mirror_path = str(payload.get("target_mirror_path") or "").strip()
         source = _require_string(payload.get("source"), "source")
         repo_name_raw = str(payload.get("repo_name") or "").strip()
+        source_import = _require_optional_bool(payload.get("source_import"), "source_import") or False
         git_lfs = _require_optional_bool(payload.get("git_lfs"), "git_lfs")
         git_timeout_seconds = _require_optional_int(payload.get("git_timeout_seconds"), "git_timeout_seconds") or 300
         branch_rev = str(payload.get("branch_rev") or "").strip()
@@ -140,6 +143,7 @@ class TargetSpec:
             target_mirror_path=target_mirror_path,
             source=normalized_source,
             repo_name=repo_name,
+            source_import=source_import,
             git_lfs=git_lfs,
             git_timeout_seconds=git_timeout_seconds,
             branches=tuple(branches),
@@ -366,6 +370,7 @@ def load_targets(mode: str, *, path: str | None = None) -> list[TargetSpec]:
                 entry.get(source_key),
                 f"{label}.targets[{index}].{source_key}",
             ),
+            "source_import": entry.get("source_import"),
             "git_lfs": entry.get("git_lfs"),
             "git_timeout_seconds": entry.get("git_timeout_seconds"),
             "branch_rev": str(entry.get("branch_rev") or "").strip(),
@@ -430,50 +435,39 @@ def _wait_for_project_import(
 
 
 # Fallback only for oversized first-push failures on newly created internal targets.
-def _fallback_import_internal_target_project(
+def _import_target_project(
     client: GitLabClient,
     *,
+    target: TargetSpec,
     project_id: int,
-    source_project_path: str,
     target_project_path: str,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], bool]:
-    source_project = get_gitlab_project(client, source_project_path)
-    if source_project is None:
-        raise SystemExit(f"Source project not found or not accessible: {source_project_path}")
-
-    authenticated_source_url = inject_basic_auth_into_url(
-        client.project_git_url(source_project_path),
-        client.username,
-        client.token,
-        "internal source import url",
-    )
+    if target.mode == "internal":
+        source_project = get_gitlab_project(client, target.source)
+        if source_project is None:
+            raise SystemExit(f"Source project not found or not accessible: {target.source}")
+        import_url = inject_basic_auth_into_url(
+            client.project_git_url(target.source),
+            client.username,
+            client.token,
+            "internal source import url",
+        )
+    else:
+        import_url = target.source
     payload = {
-        "import_url": authenticated_source_url,
+        "import_url": import_url,
         "shared_runners_enabled": False,
     }
 
     try:
         updated = gitlab_request(client, "PUT", f"/projects/{project_id}", payload)
     except ApiError as exc:
-        raise SystemExit(f"Unable to start import fallback from {source_project_path}: {exc}") from exc
+        raise SystemExit(f"Unable to start source import from {target.source}: {exc}") from exc
 
     if updated is not None and not isinstance(updated, dict):
         raise SystemExit("GitLab project update returned an invalid response")
     return _wait_for_project_import(client, target_project_path, timeout_seconds=timeout_seconds), True
-
-
-def _should_use_import_fallback(error_text: str) -> bool:
-    lowered = error_text.lower()
-    return any(
-        pattern in lowered
-        for pattern in (
-            "requested url returned error: 413",
-            "http 413",
-            "request entity too large",
-        )
-    )
-
 def _unmanaged_internal_ref_names(
     client: GitLabClient,
     *,
@@ -810,7 +804,11 @@ def inspect_target(target: TargetSpec, policy: BranchPolicy, client: GitLabClien
 
             if str(project.get("default_branch") or "") != policy.default_branch:
                 reasons.append(f"default_branch_mismatch:{policy.default_branch}")
-            if target.mode == "internal" and str(project.get("import_status") or "").strip().lower() == "finished":
+            if (
+                target.mode == "internal"
+                and not target.source_import
+                and str(project.get("import_status") or "").strip().lower() == "finished"
+            ):
                 unmanaged_branches, unmanaged_tags = _unmanaged_internal_ref_names(
                     client,
                     project_id=project_id,
@@ -1193,61 +1191,45 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
             "pruned": [],
             "unprotected": [],
         }
-        used_import_fallback = False
 
         if created:
             results["created"].append(f"project:{target.target_project_path}")
 
-        try:
-            _sync_target_refs(
-                target,
-                branches=branches,
-                tags=tags,
-                source_url=source_url,
-                source_default_branch=source_default_branch,
-                source_sha=source_sha,
-                target_url=target_url,
-                project_id=project_id,
-                client=client,
-                source_env=source_env,
-                git_env=git_env,
-                results=results,
-                secrets=secrets,
-            )
-        except SystemExit as exc:
-            error_text = str(exc) or "reconcile_failed"
-            if target.mode != "internal" or not created or not _should_use_import_fallback(error_text):
-                raise
-            project, _ = _fallback_import_internal_target_project(
+        if target.source_import and project_import_status != "finished":
+            project, _ = _import_target_project(
                 client,
+                target=target,
                 project_id=project_id,
-                source_project_path=target.source,
                 target_project_path=target.target_project_path,
                 timeout_seconds=target.git_timeout_seconds,
             )
             project_import_status = str(project.get("import_status") or "").strip().lower()
-            used_import_fallback = True
-            results["updated"].append("seed:import_fallback")
-            _sync_target_refs(
-                target,
-                branches=branches,
-                tags=tags,
-                source_url=source_url,
-                source_default_branch=source_default_branch,
-                source_sha=source_sha,
-                target_url=target_url,
-                project_id=project_id,
-                client=client,
-                source_env=source_env,
-                git_env=git_env,
-                results=results,
-                secrets=secrets,
-            )
+            results["updated"].append("seed:source_import")
+
+        _sync_target_refs(
+            target,
+            branches=branches,
+            tags=tags,
+            source_url=source_url,
+            source_default_branch=source_default_branch,
+            source_sha=source_sha,
+            target_url=target_url,
+            project_id=project_id,
+            client=client,
+            source_env=source_env,
+            git_env=git_env,
+            results=results,
+            secrets=secrets,
+        )
 
         default_branch_changed = ensure_gitlab_default_branch(client, project_id, policy.default_branch)
         if default_branch_changed:
             results["updated"].append(f"default_branch:{policy.default_branch}")
-        if target.mode == "internal" and (used_import_fallback or project_import_status == "finished"):
+        if (
+            target.mode == "internal"
+            and not target.source_import
+            and project_import_status == "finished"
+        ):
             _prune_imported_internal_refs(
                 client,
                 project_id=project_id,
