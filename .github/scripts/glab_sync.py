@@ -423,7 +423,7 @@ def _wait_for_project_import(
         project = get_gitlab_project(client, project_path)
         if isinstance(project, dict):
             status = str(project.get("import_status") or "").strip().lower()
-            if status in {"", "none", "finished"}:
+            if status == "finished":
                 return project
             if status == "failed":
                 import_error = str(project.get("import_error") or "unknown import failure").strip()
@@ -469,7 +469,9 @@ def _import_target_project(
     if updated is not None and not isinstance(updated, dict):
         raise SystemExit("GitLab project update returned an invalid response")
     return _wait_for_project_import(client, target_project_path, timeout_seconds=timeout_seconds), True
-def _unmanaged_internal_ref_names(
+
+
+def _unmanaged_ref_names(
     client: GitLabClient,
     *,
     project_id: int,
@@ -495,7 +497,7 @@ def _unmanaged_internal_ref_names(
     return unmanaged_branches, unmanaged_tags
 
 
-def _prune_imported_internal_refs(
+def _prune_imported_refs(
     client: GitLabClient,
     *,
     project_id: int,
@@ -503,7 +505,7 @@ def _prune_imported_internal_refs(
     tags: tuple[ManagedTag, ...],
     results: dict[str, list[str]],
 ) -> None:
-    unmanaged_branches, unmanaged_tags = _unmanaged_internal_ref_names(
+    unmanaged_branches, unmanaged_tags = _unmanaged_ref_names(
         client,
         project_id=project_id,
         branches=branches,
@@ -724,6 +726,7 @@ def inspect_target(target: TargetSpec, policy: BranchPolicy, client: GitLabClien
         if project is None:
             reasons.append("project_missing")
         else:
+            project_import_status = str(project.get("import_status") or "").strip().lower()
             target_url = client.project_git_url(target.target_project_path)
             branch_source_shas: dict[str, str | None] = {source_default_branch: source_sha}
 
@@ -806,12 +809,10 @@ def inspect_target(target: TargetSpec, policy: BranchPolicy, client: GitLabClien
 
             if str(project.get("default_branch") or "") != policy.default_branch:
                 reasons.append(f"default_branch_mismatch:{policy.default_branch}")
-            if (
-                target.mode == "internal"
-                and not target.source_import
-                and str(project.get("import_status") or "").strip().lower() == "finished"
-            ):
-                unmanaged_branches, unmanaged_tags = _unmanaged_internal_ref_names(
+            if target.source_import and project_import_status != "finished":
+                reasons.append("source_import_pending")
+            if not target.source_import and project_import_status == "finished":
+                unmanaged_branches, unmanaged_tags = _unmanaged_ref_names(
                     client,
                     project_id=project_id,
                     branches=branches,
@@ -1235,12 +1236,8 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
         default_branch_changed = ensure_gitlab_default_branch(client, project_id, policy.default_branch)
         if default_branch_changed:
             results["updated"].append(f"default_branch:{policy.default_branch}")
-        if (
-            target.mode == "internal"
-            and not target.source_import
-            and project_import_status == "finished"
-        ):
-            _prune_imported_internal_refs(
+        if not target.source_import and project_import_status == "finished":
+            _prune_imported_refs(
                 client,
                 project_id=project_id,
                 branches=branches,
@@ -1306,6 +1303,8 @@ def summarize_target_reasons(payload: dict[str, Any]) -> str:
     labels.extend(_summarize_ref_reasons(payload.get("tags", {})))
     if any(str(reason).startswith("default_branch_mismatch:") for reason in reasons):
         labels.append("default branch mismatch")
+    if "source_import_pending" in reasons:
+        labels.append("source import pending")
     if "unmanaged_branches_present" in reasons:
         labels.append("unexpected branches present")
     if "unmanaged_tags_present" in reasons:
