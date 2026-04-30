@@ -22,6 +22,7 @@ from _common import (
     ensure_gitlab_protected_branch,
     ensure_gitlab_protected_tag,
     get_gitlab_branch_sha,
+    get_gitlab_group_id,
     get_gitlab_project,
     get_gitlab_protected_branch,
     get_gitlab_protected_tag,
@@ -435,27 +436,63 @@ def _wait_for_project_import(
     )
 
 
-# Fallback only for oversized first-push failures on newly created internal targets.
-def _import_target_project(
-    client: GitLabClient,
-    *,
-    target: TargetSpec,
-    project_id: int,
-    target_project_path: str,
-    timeout_seconds: int,
-) -> tuple[dict[str, Any], bool]:
+def _build_project_import_url(client: GitLabClient, target: TargetSpec) -> str:
     if target.mode == "internal":
         source_project = get_gitlab_project(client, target.source)
         if source_project is None:
             raise SystemExit(f"Source project not found or not accessible: {target.source}")
-        import_url = inject_basic_auth_into_url(
+        return inject_basic_auth_into_url(
             client.project_git_url(target.source),
             client.username,
             client.token,
             "internal source import url",
         )
-    else:
-        import_url = target.source
+    return target.source
+
+
+def _import_target_project(
+    client: GitLabClient,
+    *,
+    target: TargetSpec,
+    target_project_path: str,
+    timeout_seconds: int,
+) -> tuple[dict[str, Any], bool]:
+    existing = get_gitlab_project(client, target_project_path)
+    if existing is not None:
+        status = str(existing.get("import_status") or "").strip().lower()
+        if status == "finished":
+            return existing, False
+        if status and status != "none":
+            return _wait_for_project_import(client, target_project_path, timeout_seconds=timeout_seconds), False
+
+    import_url = _build_project_import_url(client, target)
+
+    if existing is None:
+        group_path, project_name = target_project_path.rsplit("/", 1)
+        payload = {
+            "import_url": import_url,
+            "name": project_name,
+            "namespace_id": get_gitlab_group_id(client, group_path),
+            "path": project_name,
+            "shared_runners_enabled": False,
+            "visibility": "private",
+        }
+        try:
+            created = gitlab_request(client, "POST", "/projects", payload)
+        except ApiError as exc:
+            message = str(exc).lower()
+            if exc.status in {400, 409} and (
+                "already exists" in message
+                or "has already been taken" in message
+                or "path has already been taken" in message
+            ):
+                return _wait_for_project_import(client, target_project_path, timeout_seconds=timeout_seconds), False
+            raise SystemExit(f"Unable to start source import from {target.source}: {exc}") from exc
+        if created is not None and not isinstance(created, dict):
+            raise SystemExit("GitLab project create returned an invalid response")
+        return _wait_for_project_import(client, target_project_path, timeout_seconds=timeout_seconds), True
+
+    project_id = int(existing["id"])
     payload = {
         "import_url": import_url,
         "shared_runners_enabled": False,
@@ -1188,7 +1225,19 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
         branches = target.managed_branches(policy, source_default_branch)
         tags = target.managed_tags()
 
-        project, created = ensure_gitlab_project(client, target.target_project_path)
+        if target.source_import:
+            existing_before = get_gitlab_project(client, target.target_project_path)
+            status_before = str(existing_before.get("import_status") or "").strip().lower() if isinstance(existing_before, dict) else ""
+            project, created = _import_target_project(
+                client,
+                target=target,
+                target_project_path=target.target_project_path,
+                timeout_seconds=target.git_timeout_seconds,
+            )
+            used_source_import = existing_before is None or status_before in {"", "none"}
+        else:
+            project, created = ensure_gitlab_project(client, target.target_project_path)
+            used_source_import = False
         project_id = int(project["id"])
         project_import_status = str(project.get("import_status") or "").strip().lower()
         target_url = client.project_git_url(target.target_project_path)
@@ -1206,15 +1255,7 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
         if created:
             results["created"].append(f"project:{target.target_project_path}")
 
-        if target.source_import and project_import_status != "finished":
-            project, _ = _import_target_project(
-                client,
-                target=target,
-                project_id=project_id,
-                target_project_path=target.target_project_path,
-                timeout_seconds=target.git_timeout_seconds,
-            )
-            project_import_status = str(project.get("import_status") or "").strip().lower()
+        if target.source_import and used_source_import:
             results["updated"].append("seed:source_import")
 
         _sync_target_refs(
