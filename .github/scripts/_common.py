@@ -595,6 +595,22 @@ def get_gitlab_branch_sha(client: GitLabClient, project_id: int, branch: str) ->
     return str(commit_id) if isinstance(commit_id, str) else None
 
 
+def create_gitlab_branch(client: GitLabClient, project_id: int, branch: str, ref: str) -> bool:
+    payload = {
+        "branch": branch,
+        "ref": ref,
+    }
+    try:
+        created = gitlab_request(client, "POST", f"/projects/{project_id}/repository/branches", payload)
+    except ApiError as exc:
+        if _is_already_exists_conflict(exc):
+            return False
+        raise
+    if not isinstance(created, dict):
+        raise SystemExit("GitLab branch create returned an invalid response")
+    return True
+
+
 def list_gitlab_branches(client: GitLabClient, project_id: int) -> list[dict[str, Any]]:
     page = 1
     branches: list[dict[str, Any]] = []

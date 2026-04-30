@@ -227,6 +227,29 @@ class CommonTests(unittest.TestCase):
             self.assertFalse(_common.delete_gitlab_branch(client, 42, "feature/demo"))
             self.assertFalse(_common.delete_gitlab_tag(client, 42, "v1.0.0"))
 
+    def test_create_gitlab_branch_posts_branch_ref_payload(self):
+        client = _common.GitLabClient(
+            base_url="https://gitlab.com",
+            username="svc-user",
+            token="secret-token",
+        )
+        with unittest.mock.patch.object(
+            _common,
+            "gitlab_request",
+            return_value={"name": "gitlab/mcr/main"},
+        ) as request:
+            changed = _common.create_gitlab_branch(client, 42, "gitlab/mcr/main", "main")
+        self.assertTrue(changed)
+        request.assert_called_once_with(
+            client,
+            "POST",
+            "/projects/42/repository/branches",
+            {
+                "branch": "gitlab/mcr/main",
+                "ref": "main",
+            },
+        )
+
     def test_ensure_gitlab_project_disables_shared_runners_on_create(self):
         client = _common.GitLabClient(
             base_url="https://gitlab.com",

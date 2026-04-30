@@ -766,6 +766,57 @@ class GlabSyncTests(unittest.TestCase):
 
         prune_refs.assert_not_called()
 
+    def test_sync_branch_uses_imported_source_branch_for_source_import_targets(self):
+        client = GitLabClient(base_url="https://gitlab.example", username="svc", token="token")
+        target = glab_sync.TargetSpec(
+            mode="internal",
+            target_project_path="glab-forks/team/demo",
+            source="kalilinux/demo",
+            repo_name="demo",
+            source_import=True,
+        )
+        branch = glab_sync.ManagedBranch(
+            display_name="main",
+            source_name="main",
+            target_name="gitlab/mcr/main",
+            protected=True,
+            upstream=True,
+        )
+        results = {
+            "created": [],
+            "updated": [],
+            "skipped": [],
+            "protected": [],
+            "pruned": [],
+            "unprotected": [],
+        }
+
+        with mock.patch.object(glab_sync, "get_gitlab_branch_sha", return_value="a" * 40):
+            with mock.patch.object(glab_sync, "create_gitlab_branch", return_value=True) as create_branch:
+                with mock.patch.object(glab_sync, "_push_ref") as push_ref:
+                    with mock.patch.object(glab_sync, "ensure_gitlab_protected_branch", return_value=True):
+                        glab_sync._sync_branch(
+                            branch,
+                            target=target,
+                            repo_path="/tmp/repo.git",
+                            source_url="https://gitlab.example/source/demo.git",
+                            target_url="https://gitlab.example/target/demo.git",
+                            project_id=77,
+                            client=client,
+                            existing_sha=None,
+                            source_sha="a" * 40,
+                            git_lfs_enabled=False,
+                            git_timeout_seconds=300,
+                            secrets=("token", "svc"),
+                            git_env={"GIT_ASKPASS": "/tmp/askpass"},
+                            results=results,
+                        )
+
+        create_branch.assert_called_once_with(client, 77, "gitlab/mcr/main", "main")
+        push_ref.assert_not_called()
+        self.assertEqual(results["created"], ["gitlab/mcr/main"])
+        self.assertEqual(results["protected"], ["gitlab/mcr/main"])
+
     def test_load_gitlab_client_uses_mode_specific_secret_names(self):
         values = {
             "GL_BASE_URL": "https://gitlab.com",

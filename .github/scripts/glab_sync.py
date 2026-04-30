@@ -12,6 +12,7 @@ from typing import Any
 from _common import (
     ApiError,
     GitLabClient,
+    create_gitlab_branch,
     delete_gitlab_branch,
     delete_gitlab_protected_branch,
     delete_gitlab_tag,
@@ -649,6 +650,7 @@ def _sync_target_refs(
         for branch in branches:
             _sync_branch(
                 branch,
+                target=target,
                 repo_path=repo_path,
                 source_url=source_url,
                 target_url=target_url,
@@ -1014,6 +1016,7 @@ def _push_ref(
 def _sync_branch(
     branch: ManagedBranch,
     *,
+    target: TargetSpec,
     repo_path: str,
     source_url: str,
     target_url: str,
@@ -1040,22 +1043,29 @@ def _sync_branch(
         return
 
     if existing_sha is None:
-        outcome = _push_ref(
-            repo_path,
-            source_url,
-            target_url,
-            branch.source_name,
-            branch.target_name,
-            ref_namespace="heads",
-            source_remote="source",
-            target_remote="target",
-            expected_remote_sha=None,
-            allow_existing=True,
-            git_lfs_enabled=git_lfs_enabled,
-            timeout_seconds=git_timeout_seconds,
-            secrets=secrets,
-            env_overrides=git_env,
-        )
+        outcome = None
+        if target.source_import and source_sha is not None:
+            imported_source_sha = get_gitlab_branch_sha(client, project_id, branch.source_name)
+            if imported_source_sha == source_sha:
+                created = create_gitlab_branch(client, project_id, branch.target_name, branch.source_name)
+                outcome = "updated" if created else "skipped"
+        if outcome is None:
+            outcome = _push_ref(
+                repo_path,
+                source_url,
+                target_url,
+                branch.source_name,
+                branch.target_name,
+                ref_namespace="heads",
+                source_remote="source",
+                target_remote="target",
+                expected_remote_sha=None,
+                allow_existing=True,
+                git_lfs_enabled=git_lfs_enabled,
+                timeout_seconds=git_timeout_seconds,
+                secrets=secrets,
+                env_overrides=git_env,
+            )
         results["created" if outcome != "skipped" else "skipped"].append(branch.target_name)
     elif branch.upstream:
         if source_sha is not None and existing_sha == source_sha:
