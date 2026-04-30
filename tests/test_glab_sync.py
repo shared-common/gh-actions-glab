@@ -320,6 +320,45 @@ class GlabSyncTests(unittest.TestCase):
         self.assertIn("protection_missing:v1.0.0", planned["reasons"])
         self.assertIn("default_branch_mismatch:gitlab/mcr/main", planned["reasons"])
 
+    def test_inspect_target_flags_unmanaged_refs_for_imported_internal_project(self):
+        client = GitLabClient(base_url="https://gitlab.com", username="svc", token="token")
+        target = glab_sync.TargetSpec(
+            mode="internal",
+            target_project_path="top/sub/demo",
+            source="top/upstream/demo",
+            repo_name="demo",
+        )
+        project = {"id": 77, "default_branch": "gitlab/mcr/main", "import_status": "finished"}
+
+        def branch_sha_side_effect(_client, _project_id, branch):
+            return {
+                "gitlab/mcr/main": "a" * 40,
+                "gitlab/mcr/staging": "a" * 40,
+                "gitlab/mcr/release": "a" * 40,
+            }[branch]
+
+        with mock.patch.object(glab_sync, "git_source_head", return_value=("main", "a" * 40)):
+            with mock.patch.object(glab_sync, "get_gitlab_project", return_value=project):
+                with mock.patch.object(glab_sync, "get_gitlab_branch_sha", side_effect=branch_sha_side_effect):
+                    with mock.patch.object(glab_sync, "git_remote_ref_sha", return_value=None):
+                        with mock.patch.object(glab_sync, "get_gitlab_protected_branch", return_value={
+                            "push_access_levels": [{"access_level": 40}],
+                            "merge_access_levels": [{"access_level": 40}],
+                            "unprotect_access_levels": [{"access_level": 40}],
+                            "allow_force_push": True,
+                        }):
+                            with mock.patch.object(glab_sync, "list_gitlab_branches", return_value=[
+                                {"name": "main"},
+                                {"name": "gitlab/mcr/main"},
+                                {"name": "gitlab/mcr/staging"},
+                                {"name": "gitlab/mcr/release"},
+                            ]):
+                                with mock.patch.object(glab_sync, "list_gitlab_tags", return_value=[{"name": "v1.0.0"}]):
+                                    planned = glab_sync.inspect_target(target, make_policy(), client)
+
+        self.assertIn("unmanaged_branches_present", planned["reasons"])
+        self.assertIn("unmanaged_tags_present", planned["reasons"])
+
     def test_render_plan_summary_counts_actionable_items(self):
         summary = glab_sync.render_plan_summary(
             "external",
@@ -365,6 +404,7 @@ class GlabSyncTests(unittest.TestCase):
                     "updated": [],
                     "skipped": [],
                     "protected": [],
+                    "pruned": [],
                     "unprotected": [],
                 },
             }
@@ -373,68 +413,122 @@ class GlabSyncTests(unittest.TestCase):
         self.assertIn("target-aaaaaaaaaaaa", summary)
         self.assertNotIn("https://gitlab.example/top/demo.git", summary)
 
-    def test_bootstrap_internal_target_project_imports_missing_target_and_waits_for_import(self):
+    def test_prune_imported_internal_refs_removes_unmanaged_branches_and_tags(self):
+        client = GitLabClient(base_url="https://gitlab.example", username="svc", token="token")
+        branches = make_policy().mirrors
+        managed_branches = (
+            glab_sync.ManagedBranch("main", "main", branches[0].target_name, True, True),
+            glab_sync.ManagedBranch("staging", "main", branches[1].target_name, True, True),
+            glab_sync.ManagedBranch("release", "main", branches[2].target_name, True, True),
+        )
+        managed_tags = (
+            glab_sync.ManagedTag("tag v1.0.0", "v1.0.0", "v1.0.0", True, True),
+        )
+        results = {"pruned": []}
+
+        with mock.patch.object(
+            glab_sync,
+            "list_gitlab_branches",
+            return_value=[
+                {"name": "main"},
+                {"name": "gitlab/mcr/main"},
+                {"name": "gitlab/mcr/staging"},
+                {"name": "gitlab/mcr/release"},
+                {"name": "topic/demo"},
+            ],
+        ):
+            with mock.patch.object(
+                glab_sync,
+                "list_gitlab_tags",
+                return_value=[{"name": "v1.0.0"}, {"name": "v2.0.0"}],
+            ):
+                with mock.patch.object(glab_sync, "delete_gitlab_protected_branch") as delete_protected_branch:
+                    with mock.patch.object(glab_sync, "delete_gitlab_branch", return_value=True) as delete_branch:
+                        with mock.patch.object(glab_sync, "delete_gitlab_protected_tag") as delete_protected_tag:
+                            with mock.patch.object(glab_sync, "delete_gitlab_tag", return_value=True) as delete_tag:
+                                glab_sync._prune_imported_internal_refs(
+                                    client,
+                                    project_id=77,
+                                    branches=managed_branches,
+                                    tags=managed_tags,
+                                    results=results,
+                                )
+
+        self.assertEqual(results["pruned"], ["branch:main", "branch:topic/demo", "tag:v2.0.0"])
+        self.assertEqual(
+            [call.args[2] for call in delete_protected_branch.call_args_list],
+            ["main", "topic/demo"],
+        )
+        self.assertEqual(
+            [call.args[2] for call in delete_branch.call_args_list],
+            ["main", "topic/demo"],
+        )
+        delete_protected_tag.assert_called_once_with(client, 77, "v2.0.0")
+        delete_tag.assert_called_once_with(client, 77, "v2.0.0")
+
+    def test_fallback_import_internal_target_project_updates_existing_project_and_waits_for_import(self):
         client = GitLabClient(base_url="https://gitlab.example", username="svc", token="token")
         project_states = [
-            None,
             {"id": 17},
-            None,
             {"id": 29, "import_status": "started"},
             {"id": 29, "import_status": "finished", "path_with_namespace": "glab-forks/team/demo"},
         ]
         with mock.patch.object(glab_sync, "get_gitlab_project", side_effect=project_states):
-            with mock.patch.object(glab_sync, "get_gitlab_group_id", return_value=55):
-                with mock.patch.object(
-                    glab_sync,
-                    "gitlab_request",
-                    return_value={"id": 29, "import_status": "scheduled"},
-                ) as request:
-                    with mock.patch("glab_sync.time.sleep") as sleep:
-                        project, created = glab_sync._bootstrap_internal_target_project(
+            with mock.patch.object(
+                glab_sync,
+                "gitlab_request",
+                return_value={"id": 29, "import_status": "scheduled"},
+            ) as request:
+                with mock.patch("glab_sync.time.sleep") as sleep:
+                    project, created = glab_sync._fallback_import_internal_target_project(
+                        client,
+                        project_id=29,
+                        source_project_path="kalilinux/demo",
+                        target_project_path="glab-forks/team/demo",
+                        timeout_seconds=30,
+                    )
+
+        self.assertTrue(created)
+        self.assertEqual(project["id"], 29)
+        self.assertEqual(sleep.call_count, 1)
+        request.assert_called_once_with(
+            client,
+            "PUT",
+            "/projects/29",
+            {
+                "import_url": "https://svc:token@gitlab.example/kalilinux/demo.git",
+                "shared_runners_enabled": False,
+            },
+        )
+
+    def test_fallback_import_internal_target_project_raises_when_import_fails(self):
+        client = GitLabClient(base_url="https://gitlab.example", username="svc", token="token")
+        project_states = [
+            {"id": 17},
+            {"id": 29, "import_status": "failed", "import_error": "import failed"},
+        ]
+        with mock.patch.object(glab_sync, "get_gitlab_project", side_effect=project_states):
+            with mock.patch.object(glab_sync, "gitlab_request", return_value={"id": 29}):
+                with mock.patch("glab_sync.time.sleep"):
+                    with self.assertRaises(SystemExit) as exc:
+                        glab_sync._fallback_import_internal_target_project(
                             client,
+                            project_id=29,
                             source_project_path="kalilinux/demo",
                             target_project_path="glab-forks/team/demo",
                             timeout_seconds=30,
                         )
+        self.assertIn("import failed", str(exc.exception))
 
-        self.assertTrue(created)
-        self.assertEqual(project["id"], 29)
-        self.assertEqual(sleep.call_count, 2)
-        request.assert_called_once_with(
-            client,
-            "POST",
-            "/projects",
-            {
-                "import_url": "https://svc:token@gitlab.example/kalilinux/demo.git",
-                "name": "demo",
-                "namespace_id": 55,
-                "path": "demo",
-                "shared_runners_enabled": False,
-                "visibility": "private",
-            },
+    def test_should_use_import_fallback_matches_413_transport_failures(self):
+        self.assertTrue(
+            glab_sync._should_use_import_fallback(
+                "error: RPC failed; HTTP 413 curl 22 The requested URL returned error: 413"
+            )
         )
+        self.assertFalse(glab_sync._should_use_import_fallback("fatal: could not read Username"))
 
-    def test_bootstrap_internal_target_project_raises_when_import_fails(self):
-        client = GitLabClient(base_url="https://gitlab.example", username="svc", token="token")
-        project_states = [
-            None,
-            {"id": 17},
-            {"id": 29, "import_status": "failed", "import_error": "fork failed"},
-        ]
-        with mock.patch.object(glab_sync, "get_gitlab_project", side_effect=project_states):
-            with mock.patch.object(glab_sync, "get_gitlab_group_id", return_value=55):
-                with mock.patch.object(glab_sync, "gitlab_request", return_value={"id": 29}):
-                    with mock.patch("glab_sync.time.sleep"):
-                        with self.assertRaises(SystemExit) as exc:
-                            glab_sync._bootstrap_internal_target_project(
-                                client,
-                                source_project_path="kalilinux/demo",
-                                target_project_path="glab-forks/team/demo",
-                                timeout_seconds=30,
-                            )
-        self.assertIn("fork failed", str(exc.exception))
-
-    def test_reconcile_target_bootstraps_missing_internal_projects_before_git_sync(self):
+    def test_reconcile_target_uses_normal_creation_path_before_import_fallback(self):
         client = GitLabClient(base_url="https://gitlab.example", username="svc", token="token")
         target = glab_sync.TargetSpec(
             mode="internal",
@@ -449,30 +543,90 @@ class GlabSyncTests(unittest.TestCase):
                 "git_askpass_env",
                 return_value=contextlib.nullcontext({"GIT_ASKPASS": "/tmp/askpass"}),
             ):
-                with mock.patch.object(
-                    glab_sync,
-                    "_bootstrap_internal_target_project",
-                    return_value=({"id": 77}, True),
-                ) as bootstrap:
-                    with mock.patch.object(glab_sync, "ensure_gitlab_project") as ensure_project:
-                        with mock.patch.object(glab_sync, "get_gitlab_branch_sha", return_value=None):
-                            with mock.patch.object(glab_sync, "_fetch_source_ref") as fetch_ref:
-                                with mock.patch.object(glab_sync, "_target_uses_git_lfs", return_value=False):
-                                    with mock.patch.object(glab_sync, "_sync_branch") as sync_branch:
-                                        with mock.patch.object(glab_sync, "ensure_gitlab_default_branch", return_value=False):
-                                            with mock.patch.object(glab_sync, "run_command"):
-                                                payload = glab_sync.reconcile_target(target, make_policy(), client)
+                with mock.patch.object(glab_sync, "ensure_gitlab_project", return_value=({"id": 77}, True)) as ensure_project:
+                    with mock.patch.object(glab_sync, "_sync_target_refs") as sync_refs:
+                        with mock.patch.object(glab_sync, "_fallback_import_internal_target_project") as import_fallback:
+                            with mock.patch.object(glab_sync, "ensure_gitlab_default_branch", return_value=False):
+                                with mock.patch.object(glab_sync, "_prune_imported_internal_refs") as prune_refs:
+                                    payload = glab_sync.reconcile_target(target, make_policy(), client)
 
         self.assertEqual(payload["target_project_path"], "glab-forks/team/demo")
-        bootstrap.assert_called_once_with(
+        ensure_project.assert_called_once_with(
             client,
+            "glab-forks/team/demo",
+        )
+        sync_refs.assert_called_once()
+        import_fallback.assert_not_called()
+        prune_refs.assert_not_called()
+
+    def test_reconcile_target_uses_import_fallback_only_after_413_seed_failure(self):
+        client = GitLabClient(base_url="https://gitlab.example", username="svc", token="token")
+        target = glab_sync.TargetSpec(
+            mode="internal",
+            target_project_path="glab-forks/team/demo",
+            source="kalilinux/demo",
+            repo_name="demo",
+        )
+
+        with mock.patch.object(glab_sync, "git_source_head", return_value=("main", "a" * 40)):
+            with mock.patch.object(
+                glab_sync,
+                "git_askpass_env",
+                return_value=contextlib.nullcontext({"GIT_ASKPASS": "/tmp/askpass"}),
+            ):
+                with mock.patch.object(glab_sync, "ensure_gitlab_project", return_value=({"id": 77}, True)):
+                    with mock.patch.object(
+                        glab_sync,
+                        "_sync_target_refs",
+                        side_effect=[
+                            SystemExit(
+                                "error: RPC failed; HTTP 413 curl 22 The requested URL returned error: 413"
+                            ),
+                            None,
+                        ],
+                    ) as sync_refs:
+                        with mock.patch.object(
+                            glab_sync,
+                            "_fallback_import_internal_target_project",
+                            return_value=({"id": 77, "import_status": "finished"}, True),
+                        ) as import_fallback:
+                            with mock.patch.object(glab_sync, "ensure_gitlab_default_branch", return_value=False):
+                                with mock.patch.object(glab_sync, "_prune_imported_internal_refs") as prune_refs:
+                                    payload = glab_sync.reconcile_target(target, make_policy(), client)
+
+        self.assertEqual(sync_refs.call_count, 2)
+        import_fallback.assert_called_once_with(
+            client,
+            project_id=77,
             source_project_path="kalilinux/demo",
             target_project_path="glab-forks/team/demo",
             timeout_seconds=300,
         )
-        ensure_project.assert_not_called()
-        fetch_ref.assert_called_once()
-        self.assertEqual(sync_branch.call_count, 3)
+        prune_refs.assert_called_once()
+        self.assertIn("seed:import_fallback", payload["results"]["updated"])
+
+    def test_reconcile_target_prunes_existing_imported_internal_projects(self):
+        client = GitLabClient(base_url="https://gitlab.example", username="svc", token="token")
+        target = glab_sync.TargetSpec(
+            mode="internal",
+            target_project_path="glab-forks/team/demo",
+            source="kalilinux/demo",
+            repo_name="demo",
+        )
+
+        with mock.patch.object(glab_sync, "git_source_head", return_value=("main", "a" * 40)):
+            with mock.patch.object(
+                glab_sync,
+                "git_askpass_env",
+                return_value=contextlib.nullcontext({"GIT_ASKPASS": "/tmp/askpass"}),
+            ):
+                with mock.patch.object(glab_sync, "ensure_gitlab_project", return_value=({"id": 77, "import_status": "finished"}, False)):
+                    with mock.patch.object(glab_sync, "_sync_target_refs"):
+                        with mock.patch.object(glab_sync, "ensure_gitlab_default_branch", return_value=False):
+                            with mock.patch.object(glab_sync, "_prune_imported_internal_refs") as prune_refs:
+                                glab_sync.reconcile_target(target, make_policy(), client)
+
+        prune_refs.assert_called_once()
 
     def test_load_gitlab_client_uses_mode_specific_secret_names(self):
         values = {

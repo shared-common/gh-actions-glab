@@ -595,6 +595,34 @@ def get_gitlab_branch_sha(client: GitLabClient, project_id: int, branch: str) ->
     return str(commit_id) if isinstance(commit_id, str) else None
 
 
+def list_gitlab_branches(client: GitLabClient, project_id: int) -> list[dict[str, Any]]:
+    page = 1
+    branches: list[dict[str, Any]] = []
+    while True:
+        data = gitlab_request(client, "GET", f"/projects/{project_id}/repository/branches?per_page=100&page={page}")
+        if not isinstance(data, list):
+            raise SystemExit("GitLab branch list returned an invalid response")
+        if not data:
+            return branches
+        for item in data:
+            if isinstance(item, dict):
+                branches.append(item)
+        if len(data) < 100:
+            return branches
+        page += 1
+
+
+def delete_gitlab_branch(client: GitLabClient, project_id: int, branch: str) -> bool:
+    encoded = urllib.parse.quote(branch, safe="")
+    try:
+        gitlab_request(client, "DELETE", f"/projects/{project_id}/repository/branches/{encoded}")
+    except ApiError as exc:
+        if exc.status == 404:
+            return False
+        raise
+    return True
+
+
 def get_gitlab_protected_branch(client: GitLabClient, project_id: int, branch: str) -> Optional[dict[str, Any]]:
     encoded = urllib.parse.quote(branch, safe="")
     try:
@@ -615,6 +643,34 @@ def get_gitlab_protected_tag(client: GitLabClient, project_id: int, tag: str) ->
             return None
         raise
     return data if isinstance(data, dict) else None
+
+
+def list_gitlab_tags(client: GitLabClient, project_id: int) -> list[dict[str, Any]]:
+    page = 1
+    tags: list[dict[str, Any]] = []
+    while True:
+        data = gitlab_request(client, "GET", f"/projects/{project_id}/repository/tags?per_page=100&page={page}")
+        if not isinstance(data, list):
+            raise SystemExit("GitLab tag list returned an invalid response")
+        if not data:
+            return tags
+        for item in data:
+            if isinstance(item, dict):
+                tags.append(item)
+        if len(data) < 100:
+            return tags
+        page += 1
+
+
+def delete_gitlab_tag(client: GitLabClient, project_id: int, tag: str) -> bool:
+    encoded = urllib.parse.quote(tag, safe="")
+    try:
+        gitlab_request(client, "DELETE", f"/projects/{project_id}/repository/tags/{encoded}")
+    except ApiError as exc:
+        if exc.status == 404:
+            return False
+        raise
+    return True
 
 
 def _access_level_set(data: Optional[dict[str, Any]], key: str) -> set[int]:

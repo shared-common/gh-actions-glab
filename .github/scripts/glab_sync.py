@@ -12,14 +12,15 @@ from typing import Any
 from _common import (
     ApiError,
     GitLabClient,
+    delete_gitlab_branch,
     delete_gitlab_protected_branch,
+    delete_gitlab_tag,
     delete_gitlab_protected_tag,
     ensure_gitlab_default_branch,
     ensure_gitlab_project,
     ensure_gitlab_protected_branch,
     ensure_gitlab_protected_tag,
     get_gitlab_branch_sha,
-    get_gitlab_group_id,
     get_gitlab_project,
     get_gitlab_protected_branch,
     get_gitlab_protected_tag,
@@ -27,6 +28,8 @@ from _common import (
     gitlab_request,
     git_source_head,
     inject_basic_auth_into_url,
+    list_gitlab_branches,
+    list_gitlab_tags,
     load_json_file,
     normalize_gitlab_project_url,
     protected_branch_allows_sync,
@@ -426,23 +429,19 @@ def _wait_for_project_import(
     )
 
 
-# Bootstrap missing internal targets on the GitLab side so the first sync does not upload full history from Actions.
-def _bootstrap_internal_target_project(
+# Fallback only for oversized first-push failures on newly created internal targets.
+def _fallback_import_internal_target_project(
     client: GitLabClient,
     *,
+    project_id: int,
     source_project_path: str,
     target_project_path: str,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], bool]:
-    existing = get_gitlab_project(client, target_project_path)
-    if existing is not None:
-        return existing, False
-
     source_project = get_gitlab_project(client, source_project_path)
     if source_project is None:
         raise SystemExit(f"Source project not found or not accessible: {source_project_path}")
 
-    group_path, project_name = target_project_path.rsplit("/", 1)
     authenticated_source_url = inject_basic_auth_into_url(
         client.project_git_url(source_project_path),
         client.username,
@@ -451,30 +450,241 @@ def _bootstrap_internal_target_project(
     )
     payload = {
         "import_url": authenticated_source_url,
-        "name": project_name,
-        "namespace_id": get_gitlab_group_id(client, group_path),
-        "path": project_name,
         "shared_runners_enabled": False,
-        "visibility": "private",
     }
 
     try:
-        created = gitlab_request(client, "POST", "/projects", payload)
+        updated = gitlab_request(client, "PUT", f"/projects/{project_id}", payload)
     except ApiError as exc:
-        message = str(exc).lower()
-        if exc.status in {400, 409} and (
-            "already exists" in message
-            or "has already been taken" in message
-            or "path has already been taken" in message
-        ):
-            return _wait_for_project_import(client, target_project_path, timeout_seconds=timeout_seconds), False
-        raise SystemExit(
-            f"Unable to bootstrap internal target project from {source_project_path}: {exc}"
-        ) from exc
+        raise SystemExit(f"Unable to start import fallback from {source_project_path}: {exc}") from exc
 
-    if created is not None and not isinstance(created, dict):
-        raise SystemExit("GitLab project create returned an invalid response")
+    if updated is not None and not isinstance(updated, dict):
+        raise SystemExit("GitLab project update returned an invalid response")
     return _wait_for_project_import(client, target_project_path, timeout_seconds=timeout_seconds), True
+
+
+def _should_use_import_fallback(error_text: str) -> bool:
+    lowered = error_text.lower()
+    return any(
+        pattern in lowered
+        for pattern in (
+            "requested url returned error: 413",
+            "http 413",
+            "request entity too large",
+        )
+    )
+
+def _unmanaged_internal_ref_names(
+    client: GitLabClient,
+    *,
+    project_id: int,
+    branches: tuple[ManagedBranch, ...],
+    tags: tuple[ManagedTag, ...],
+) -> tuple[list[str], list[str]]:
+    keep_branches = {branch.target_name for branch in branches}
+    keep_tags = {tag.target_name for tag in tags}
+    unmanaged_branches: list[str] = []
+    unmanaged_tags: list[str] = []
+
+    for item in list_gitlab_branches(client, project_id):
+        branch_name = str(item.get("name") or "").strip()
+        if not branch_name or branch_name in keep_branches:
+            continue
+        unmanaged_branches.append(branch_name)
+
+    for item in list_gitlab_tags(client, project_id):
+        tag_name = str(item.get("name") or "").strip()
+        if not tag_name or tag_name in keep_tags:
+            continue
+        unmanaged_tags.append(tag_name)
+    return unmanaged_branches, unmanaged_tags
+
+
+def _prune_imported_internal_refs(
+    client: GitLabClient,
+    *,
+    project_id: int,
+    branches: tuple[ManagedBranch, ...],
+    tags: tuple[ManagedTag, ...],
+    results: dict[str, list[str]],
+) -> None:
+    unmanaged_branches, unmanaged_tags = _unmanaged_internal_ref_names(
+        client,
+        project_id=project_id,
+        branches=branches,
+        tags=tags,
+    )
+    for branch_name in unmanaged_branches:
+        delete_gitlab_protected_branch(client, project_id, branch_name)
+        if delete_gitlab_branch(client, project_id, branch_name):
+            results["pruned"].append(f"branch:{branch_name}")
+
+    for tag_name in unmanaged_tags:
+        delete_gitlab_protected_tag(client, project_id, tag_name)
+        if delete_gitlab_tag(client, project_id, tag_name):
+            results["pruned"].append(f"tag:{tag_name}")
+
+
+def _sync_target_refs(
+    target: TargetSpec,
+    *,
+    branches: tuple[ManagedBranch, ...],
+    tags: tuple[ManagedTag, ...],
+    source_url: str,
+    source_default_branch: str,
+    source_sha: str,
+    target_url: str,
+    project_id: int,
+    client: GitLabClient,
+    source_env: dict[str, str] | None,
+    git_env: dict[str, str],
+    results: dict[str, list[str]],
+    secrets: tuple[str, ...],
+) -> None:
+    branch_existing: dict[str, str | None] = {
+        branch.target_name: get_gitlab_branch_sha(client, project_id, branch.target_name) for branch in branches
+    }
+    branch_source: dict[str, str | None] = {source_default_branch: source_sha}
+    for branch in branches:
+        if branch.upstream or branch_existing[branch.target_name] is None:
+            if branch.source_name not in branch_source:
+                branch_source[branch.source_name] = git_remote_ref_sha(
+                    source_url,
+                    "heads",
+                    branch.source_name,
+                    secrets=secrets,
+                    env_overrides=source_env,
+                )
+
+    tag_existing: dict[str, str | None] = {
+        tag.target_name: git_remote_ref_sha(
+            target_url,
+            "tags",
+            tag.target_name,
+            secrets=secrets,
+            env_overrides=git_env,
+        )
+        for tag in tags
+    }
+    tag_source: dict[str, str | None] = {}
+    for tag in tags:
+        if tag.upstream or tag_existing[tag.target_name] is None:
+            if tag.source_name not in tag_source:
+                tag_source[tag.source_name] = git_remote_ref_sha(
+                    source_url,
+                    "tags",
+                    tag.source_name,
+                    secrets=secrets,
+                    env_overrides=source_env,
+                )
+
+    with tempfile.TemporaryDirectory() as repo_dir:
+        repo_path = str(Path(repo_dir) / "repo.git")
+        run_command(["git", "init", "--bare", repo_path], secrets=secrets, timeout=120, env_overrides=git_env)
+        run_command(
+            ["git", "-C", repo_path, "remote", "add", "source", source_url],
+            secrets=secrets,
+            timeout=120,
+            env_overrides=git_env,
+        )
+        run_command(
+            ["git", "-C", repo_path, "remote", "add", "target", target_url],
+            secrets=secrets,
+            timeout=120,
+            env_overrides=git_env,
+        )
+        fetched_branch_sources: set[str] = set()
+        fetched_tag_sources: set[str] = set()
+
+        for branch in branches:
+            needs_source = branch.upstream or branch_existing[branch.target_name] is None
+            if (
+                needs_source
+                and branch_source.get(branch.source_name) is not None
+                and branch.source_name not in fetched_branch_sources
+            ):
+                _fetch_source_ref(
+                    repo_path,
+                    "source",
+                    "heads",
+                    branch.source_name,
+                    timeout_seconds=target.git_timeout_seconds,
+                    secrets=secrets,
+                    env_overrides=source_env,
+                )
+                fetched_branch_sources.add(branch.source_name)
+
+        for tag in tags:
+            needs_source = tag.upstream or tag_existing[tag.target_name] is None
+            if (
+                needs_source
+                and tag_source.get(tag.source_name) is not None
+                and tag.source_name not in fetched_tag_sources
+            ):
+                _fetch_source_ref(
+                    repo_path,
+                    "source",
+                    "tags",
+                    tag.source_name,
+                    timeout_seconds=target.git_timeout_seconds,
+                    secrets=secrets,
+                    env_overrides=source_env,
+                )
+                fetched_tag_sources.add(tag.source_name)
+        fetched_refs = tuple(
+            sorted(
+                [f"refs/heads/{name}" for name in fetched_branch_sources]
+                + [f"refs/tags/{name}" for name in fetched_tag_sources]
+            )
+        )
+        git_lfs_enabled = _target_uses_git_lfs(
+            target,
+            repo_path,
+            fetched_refs,
+            secrets=secrets,
+            env_overrides=git_env,
+        )
+        if git_lfs_enabled:
+            run_command(
+                ["git", "-C", repo_path, "lfs", "install", "--local"],
+                secrets=secrets,
+                timeout=120,
+                env_overrides=git_env,
+            )
+
+        for branch in branches:
+            _sync_branch(
+                branch,
+                repo_path=repo_path,
+                source_url=source_url,
+                target_url=target_url,
+                project_id=project_id,
+                client=client,
+                existing_sha=branch_existing[branch.target_name],
+                source_sha=branch_source.get(branch.source_name),
+                git_lfs_enabled=git_lfs_enabled,
+                git_timeout_seconds=target.git_timeout_seconds,
+                secrets=secrets,
+                git_env=git_env,
+                results=results,
+            )
+
+        for tag in tags:
+            _sync_tag(
+                tag,
+                repo_path=repo_path,
+                source_url=source_url,
+                target_url=target_url,
+                project_id=project_id,
+                client=client,
+                existing_sha=tag_existing[tag.target_name],
+                source_sha=tag_source.get(tag.source_name),
+                git_lfs_enabled=git_lfs_enabled,
+                git_timeout_seconds=target.git_timeout_seconds,
+                secrets=secrets,
+                git_env=git_env,
+                results=results,
+            )
 
 
 def _desired_branch_protection(branch: ManagedBranch, current: dict[str, Any] | None) -> tuple[bool, str | None]:
@@ -600,6 +810,17 @@ def inspect_target(target: TargetSpec, policy: BranchPolicy, client: GitLabClien
 
             if str(project.get("default_branch") or "") != policy.default_branch:
                 reasons.append(f"default_branch_mismatch:{policy.default_branch}")
+            if target.mode == "internal" and str(project.get("import_status") or "").strip().lower() == "finished":
+                unmanaged_branches, unmanaged_tags = _unmanaged_internal_ref_names(
+                    client,
+                    project_id=project_id,
+                    branches=branches,
+                    tags=tags,
+                )
+                if unmanaged_branches:
+                    reasons.append("unmanaged_branches_present")
+                if unmanaged_tags:
+                    reasons.append("unmanaged_tags_present")
 
     return {
         "mode": target.mode,
@@ -958,16 +1179,9 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
         branches = target.managed_branches(policy, source_default_branch)
         tags = target.managed_tags()
 
-        if target.mode == "internal":
-            project, created = _bootstrap_internal_target_project(
-                client,
-                source_project_path=target.source,
-                target_project_path=target.target_project_path,
-                timeout_seconds=target.git_timeout_seconds,
-            )
-        else:
-            project, created = ensure_gitlab_project(client, target.target_project_path)
+        project, created = ensure_gitlab_project(client, target.target_project_path)
         project_id = int(project["id"])
+        project_import_status = str(project.get("import_status") or "").strip().lower()
         target_url = client.project_git_url(target.target_project_path)
         secrets = (client.token, client.username)
 
@@ -976,160 +1190,79 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
             "updated": [],
             "skipped": [],
             "protected": [],
+            "pruned": [],
             "unprotected": [],
         }
+        used_import_fallback = False
 
         if created:
             results["created"].append(f"project:{target.target_project_path}")
 
-        branch_existing: dict[str, str | None] = {
-            branch.target_name: get_gitlab_branch_sha(client, project_id, branch.target_name) for branch in branches
-        }
-        branch_source: dict[str, str | None] = {source_default_branch: source_sha}
-        for branch in branches:
-            if branch.upstream or branch_existing[branch.target_name] is None:
-                if branch.source_name not in branch_source:
-                    branch_source[branch.source_name] = git_remote_ref_sha(
-                        source_url,
-                        "heads",
-                        branch.source_name,
-                        secrets=secrets,
-                        env_overrides=source_env,
-                    )
-
-        tag_existing: dict[str, str | None] = {
-            tag.target_name: git_remote_ref_sha(
-                target_url,
-                "tags",
-                tag.target_name,
-                secrets=secrets,
-                env_overrides=git_env,
-            )
-            for tag in tags
-        }
-        tag_source: dict[str, str | None] = {}
-        for tag in tags:
-            if tag.upstream or tag_existing[tag.target_name] is None:
-                if tag.source_name not in tag_source:
-                    tag_source[tag.source_name] = git_remote_ref_sha(
-                        source_url,
-                        "tags",
-                        tag.source_name,
-                        secrets=secrets,
-                        env_overrides=source_env,
-                    )
-
-        with tempfile.TemporaryDirectory() as repo_dir:
-            repo_path = str(Path(repo_dir) / "repo.git")
-            run_command(["git", "init", "--bare", repo_path], secrets=secrets, timeout=120, env_overrides=git_env)
-            run_command(
-                ["git", "-C", repo_path, "remote", "add", "source", source_url],
-                secrets=secrets,
-                timeout=120,
-                env_overrides=git_env,
-            )
-            run_command(
-                ["git", "-C", repo_path, "remote", "add", "target", target_url],
-                secrets=secrets,
-                timeout=120,
-                env_overrides=git_env,
-            )
-            fetched_branch_sources: set[str] = set()
-            fetched_tag_sources: set[str] = set()
-
-            for branch in branches:
-                needs_source = branch.upstream or branch_existing[branch.target_name] is None
-                if (
-                    needs_source
-                    and branch_source.get(branch.source_name) is not None
-                    and branch.source_name not in fetched_branch_sources
-                ):
-                    _fetch_source_ref(
-                        repo_path,
-                        "source",
-                        "heads",
-                        branch.source_name,
-                        timeout_seconds=target.git_timeout_seconds,
-                        secrets=secrets,
-                        env_overrides=source_env,
-                    )
-                    fetched_branch_sources.add(branch.source_name)
-
-            for tag in tags:
-                needs_source = tag.upstream or tag_existing[tag.target_name] is None
-                if (
-                    needs_source
-                    and tag_source.get(tag.source_name) is not None
-                    and tag.source_name not in fetched_tag_sources
-                ):
-                    _fetch_source_ref(
-                        repo_path,
-                        "source",
-                        "tags",
-                        tag.source_name,
-                        timeout_seconds=target.git_timeout_seconds,
-                        secrets=secrets,
-                        env_overrides=source_env,
-                    )
-                    fetched_tag_sources.add(tag.source_name)
-            fetched_refs = tuple(
-                sorted(
-                    [f"refs/heads/{name}" for name in fetched_branch_sources]
-                    + [f"refs/tags/{name}" for name in fetched_tag_sources]
-                )
-            )
-            git_lfs_enabled = _target_uses_git_lfs(
+        try:
+            _sync_target_refs(
                 target,
-                repo_path,
-                fetched_refs,
+                branches=branches,
+                tags=tags,
+                source_url=source_url,
+                source_default_branch=source_default_branch,
+                source_sha=source_sha,
+                target_url=target_url,
+                project_id=project_id,
+                client=client,
+                source_env=source_env,
+                git_env=git_env,
+                results=results,
                 secrets=secrets,
-                env_overrides=git_env,
             )
-            if git_lfs_enabled:
-                run_command(
-                    ["git", "-C", repo_path, "lfs", "install", "--local"],
-                    secrets=secrets,
-                    timeout=120,
-                    env_overrides=git_env,
-                )
-
-            for branch in branches:
-                _sync_branch(
-                    branch,
-                    repo_path=repo_path,
-                    source_url=source_url,
-                    target_url=target_url,
-                    project_id=project_id,
-                    client=client,
-                    existing_sha=branch_existing[branch.target_name],
-                    source_sha=branch_source.get(branch.source_name),
-                    git_lfs_enabled=git_lfs_enabled,
-                    git_timeout_seconds=target.git_timeout_seconds,
-                    secrets=secrets,
-                    git_env=git_env,
-                    results=results,
-                )
-
-            for tag in tags:
-                _sync_tag(
-                    tag,
-                    repo_path=repo_path,
-                    source_url=source_url,
-                    target_url=target_url,
-                    project_id=project_id,
-                    client=client,
-                    existing_sha=tag_existing[tag.target_name],
-                    source_sha=tag_source.get(tag.source_name),
-                    git_lfs_enabled=git_lfs_enabled,
-                    git_timeout_seconds=target.git_timeout_seconds,
-                    secrets=secrets,
-                    git_env=git_env,
-                    results=results,
-                )
+        except SystemExit as exc:
+            error_text = str(exc) or "reconcile_failed"
+            only_project_created = (
+                results["created"] == [f"project:{target.target_project_path}"]
+                and not results["updated"]
+                and not results["skipped"]
+                and not results["protected"]
+                and not results["pruned"]
+                and not results["unprotected"]
+            )
+            if target.mode != "internal" or not created or not only_project_created or not _should_use_import_fallback(error_text):
+                raise
+            project, _ = _fallback_import_internal_target_project(
+                client,
+                project_id=project_id,
+                source_project_path=target.source,
+                target_project_path=target.target_project_path,
+                timeout_seconds=target.git_timeout_seconds,
+            )
+            project_import_status = str(project.get("import_status") or "").strip().lower()
+            used_import_fallback = True
+            results["updated"].append("seed:import_fallback")
+            _sync_target_refs(
+                target,
+                branches=branches,
+                tags=tags,
+                source_url=source_url,
+                source_default_branch=source_default_branch,
+                source_sha=source_sha,
+                target_url=target_url,
+                project_id=project_id,
+                client=client,
+                source_env=source_env,
+                git_env=git_env,
+                results=results,
+                secrets=secrets,
+            )
 
         default_branch_changed = ensure_gitlab_default_branch(client, project_id, policy.default_branch)
         if default_branch_changed:
             results["updated"].append(f"default_branch:{policy.default_branch}")
+        if target.mode == "internal" and (used_import_fallback or project_import_status == "finished"):
+            _prune_imported_internal_refs(
+                client,
+                project_id=project_id,
+                branches=branches,
+                tags=tags,
+                results=results,
+            )
 
         return {
             "mode": target.mode,
@@ -1189,6 +1322,10 @@ def summarize_target_reasons(payload: dict[str, Any]) -> str:
     labels.extend(_summarize_ref_reasons(payload.get("tags", {})))
     if any(str(reason).startswith("default_branch_mismatch:") for reason in reasons):
         labels.append("default branch mismatch")
+    if "unmanaged_branches_present" in reasons:
+        labels.append("unexpected branches present")
+    if "unmanaged_tags_present" in reasons:
+        labels.append("unexpected tags present")
     return ", ".join(labels) if labels else "reconcile required"
 
 
@@ -1226,6 +1363,7 @@ def render_reconcile_summary(payload: dict[str, Any]) -> str:
     updated = results.get("updated", [])
     skipped = results.get("skipped", [])
     protected = results.get("protected", [])
+    pruned = results.get("pruned", [])
     unprotected = results.get("unprotected", [])
     lines = [
         f"## Reconciled `{_target_summary_name(payload)}`",
@@ -1239,6 +1377,7 @@ def render_reconcile_summary(payload: dict[str, Any]) -> str:
         f"- updated: {len(updated)}",
         f"- skipped: {len(skipped)}",
         f"- protected repaired: {len(protected)}",
+        f"- pruned imported refs: {len(pruned)}",
         f"- protection removed: {len(unprotected)}",
         "",
     ]
@@ -1247,6 +1386,7 @@ def render_reconcile_summary(payload: dict[str, Any]) -> str:
         ("Updated", updated),
         ("Skipped", skipped),
         ("Protected", protected),
+        ("Pruned", pruned),
         ("Unprotected", unprotected),
     ):
         if values:
@@ -1285,6 +1425,7 @@ def render_reconcile_batch_summary(
                 f"updated={len(results.get('updated', []))}, "
                 f"skipped={len(results.get('skipped', []))}, "
                 f"protected={len(results.get('protected', []))}, "
+                f"pruned={len(results.get('pruned', []))}, "
                 f"unprotected={len(results.get('unprotected', []))}"
             )
         lines.append("")

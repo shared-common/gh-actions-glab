@@ -124,11 +124,15 @@ project or remote mirror configuration was newly created.
 Internal entries use `source_project_path` and resolve them against
 `GL_BASE_URL`.
 
-When an internal target project does not exist yet, the workflow creates it on
-the GitLab side with `import_url` pointed at the source repository and
-`shared_runners_enabled` forced to `false` before it reconciles the managed
-refs. This keeps the initial large-history copy on the GitLab side instead of
-uploading it from the Actions runner over HTTPS.
+When an internal target project does not exist yet, the workflow first creates
+an empty private project with `shared_runners_enabled` forced to `false` and
+then reconciles only the declared managed refs from the config.
+
+If the first managed-ref seed push for a newly created internal target fails
+with an HTTP `413`-class transport error, the workflow falls back to
+`import_url` for that target only, waits for the server-side import to finish,
+and then prunes every imported branch and tag that is not part of the declared
+managed ref set.
 
 ```json
 {

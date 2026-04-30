@@ -186,6 +186,47 @@ class CommonTests(unittest.TestCase):
             "https://gitlab.com/top/sub/project.git",
         )
 
+    def test_list_gitlab_branches_and_tags_paginate(self):
+        client = _common.GitLabClient(
+            base_url="https://gitlab.com",
+            username="svc-user",
+            token="secret-token",
+        )
+        branch_page = [{"name": f"branch-{index}"} for index in range(100)]
+        tag_page = [{"name": "v1.0.0"}]
+        with unittest.mock.patch.object(
+            _common,
+            "gitlab_request",
+            side_effect=[branch_page, [], tag_page],
+        ) as request:
+            branches = _common.list_gitlab_branches(client, 42)
+            tags = _common.list_gitlab_tags(client, 42)
+
+        self.assertEqual(len(branches), 100)
+        self.assertEqual(tags, tag_page)
+        self.assertEqual(
+            request.call_args_list,
+            [
+                unittest.mock.call(client, "GET", "/projects/42/repository/branches?per_page=100&page=1"),
+                unittest.mock.call(client, "GET", "/projects/42/repository/branches?per_page=100&page=2"),
+                unittest.mock.call(client, "GET", "/projects/42/repository/tags?per_page=100&page=1"),
+            ],
+        )
+
+    def test_delete_gitlab_branch_and_tag_return_false_when_missing(self):
+        client = _common.GitLabClient(
+            base_url="https://gitlab.com",
+            username="svc-user",
+            token="secret-token",
+        )
+        with unittest.mock.patch.object(
+            _common,
+            "gitlab_request",
+            side_effect=[_common.ApiError(404, "missing"), _common.ApiError(404, "missing")],
+        ):
+            self.assertFalse(_common.delete_gitlab_branch(client, 42, "feature/demo"))
+            self.assertFalse(_common.delete_gitlab_tag(client, 42, "v1.0.0"))
+
     def test_ensure_gitlab_project_disables_shared_runners_on_create(self):
         client = _common.GitLabClient(
             base_url="https://gitlab.com",
