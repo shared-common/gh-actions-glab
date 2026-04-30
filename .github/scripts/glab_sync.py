@@ -4,11 +4,13 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from _common import (
+    ApiError,
     GitLabClient,
     delete_gitlab_protected_branch,
     delete_gitlab_protected_tag,
@@ -17,10 +19,12 @@ from _common import (
     ensure_gitlab_protected_branch,
     ensure_gitlab_protected_tag,
     get_gitlab_branch_sha,
+    get_gitlab_group_id,
     get_gitlab_project,
     get_gitlab_protected_branch,
     get_gitlab_protected_tag,
     git_askpass_env,
+    gitlab_request,
     git_source_head,
     load_json_file,
     normalize_gitlab_project_url,
@@ -395,6 +399,79 @@ def git_remote_ref_sha(
         if len(parts) == 2 and parts[1] == f"refs/{ref_namespace}/{ref_name}":
             return parts[0]
     return None
+
+
+def _wait_for_project_import(
+    client: GitLabClient,
+    project_path: str,
+    *,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    last_status = "unavailable"
+    while time.monotonic() < deadline:
+        project = get_gitlab_project(client, project_path)
+        if isinstance(project, dict):
+            status = str(project.get("import_status") or "").strip().lower()
+            if status in {"", "none", "finished"}:
+                return project
+            if status == "failed":
+                import_error = str(project.get("import_error") or "unknown import failure").strip()
+                raise SystemExit(f"GitLab project import failed for {project_path}: {import_error}")
+            last_status = status or "unavailable"
+        time.sleep(2)
+    raise SystemExit(
+        f"Timed out waiting for GitLab project import for {project_path} (last import_status: {last_status})"
+    )
+
+
+# Bootstrap missing internal targets on the GitLab side so the first sync does not upload full history from Actions.
+def _bootstrap_internal_target_project(
+    client: GitLabClient,
+    *,
+    source_project_path: str,
+    target_project_path: str,
+    source_default_branch: str,
+    timeout_seconds: int,
+) -> tuple[dict[str, Any], bool]:
+    existing = get_gitlab_project(client, target_project_path)
+    if existing is not None:
+        return existing, False
+
+    source_project = get_gitlab_project(client, source_project_path)
+    if source_project is None:
+        raise SystemExit(f"Source project not found or not accessible: {source_project_path}")
+
+    source_project_id = source_project.get("id")
+    if not isinstance(source_project_id, int):
+        raise SystemExit(f"Unable to resolve source project id for {source_project_path}")
+
+    group_path, project_name = target_project_path.rsplit("/", 1)
+    payload = {
+        "branches": source_default_branch,
+        "name": project_name,
+        "namespace_id": get_gitlab_group_id(client, group_path),
+        "path": project_name,
+        "visibility": "private",
+    }
+
+    try:
+        created = gitlab_request(client, "POST", f"/projects/{source_project_id}/fork", payload)
+    except ApiError as exc:
+        message = str(exc).lower()
+        if exc.status in {400, 409} and (
+            "already exists" in message
+            or "has already been taken" in message
+            or "path has already been taken" in message
+        ):
+            return _wait_for_project_import(client, target_project_path, timeout_seconds=timeout_seconds), False
+        raise SystemExit(
+            f"Unable to bootstrap internal target project from {source_project_path}: {exc}"
+        ) from exc
+
+    if created is not None and not isinstance(created, dict):
+        raise SystemExit("GitLab fork create returned an invalid response")
+    return _wait_for_project_import(client, target_project_path, timeout_seconds=timeout_seconds), True
 
 
 def _desired_branch_protection(branch: ManagedBranch, current: dict[str, Any] | None) -> tuple[bool, str | None]:
@@ -878,7 +955,16 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
         branches = target.managed_branches(policy, source_default_branch)
         tags = target.managed_tags()
 
-        project, created = ensure_gitlab_project(client, target.target_project_path)
+        if target.mode == "internal":
+            project, created = _bootstrap_internal_target_project(
+                client,
+                source_project_path=target.source,
+                target_project_path=target.target_project_path,
+                source_default_branch=source_default_branch,
+                timeout_seconds=target.git_timeout_seconds,
+            )
+        else:
+            project, created = ensure_gitlab_project(client, target.target_project_path)
         project_id = int(project["id"])
         target_url = client.project_git_url(target.target_project_path)
         secrets = (client.token, client.username)
