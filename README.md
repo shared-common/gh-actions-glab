@@ -124,10 +124,11 @@ project or remote mirror configuration was newly created.
 Internal entries use `source_project_path` and resolve them against
 `GL_BASE_URL`.
 
-When an internal target project does not exist yet, the workflow asks GitLab to
-fork the source project's default branch into the target namespace before it
-reconciles the managed refs. This keeps the initial large-history copy on the
-GitLab side instead of uploading it from the Actions runner over HTTPS.
+When an internal target project does not exist yet, the workflow creates it on
+the GitLab side with `import_url` pointed at the source repository and
+`shared_runners_enabled` forced to `false` before it reconciles the managed
+refs. This keeps the initial large-history copy on the GitLab side instead of
+uploading it from the Actions runner over HTTPS.
 
 ```json
 {

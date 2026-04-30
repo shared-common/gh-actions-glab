@@ -458,6 +458,7 @@ def ensure_gitlab_project(client: GitLabClient, project_path: str) -> tuple[dict
         "name": project_name,
         "path": project_name,
         "namespace_id": group_id,
+        "shared_runners_enabled": False,
         "visibility": "private",
     }
     try:

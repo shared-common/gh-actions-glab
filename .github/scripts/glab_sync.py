@@ -26,6 +26,7 @@ from _common import (
     git_askpass_env,
     gitlab_request,
     git_source_head,
+    inject_basic_auth_into_url,
     load_json_file,
     normalize_gitlab_project_url,
     protected_branch_allows_sync,
@@ -431,7 +432,6 @@ def _bootstrap_internal_target_project(
     *,
     source_project_path: str,
     target_project_path: str,
-    source_default_branch: str,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any], bool]:
     existing = get_gitlab_project(client, target_project_path)
@@ -442,21 +442,24 @@ def _bootstrap_internal_target_project(
     if source_project is None:
         raise SystemExit(f"Source project not found or not accessible: {source_project_path}")
 
-    source_project_id = source_project.get("id")
-    if not isinstance(source_project_id, int):
-        raise SystemExit(f"Unable to resolve source project id for {source_project_path}")
-
     group_path, project_name = target_project_path.rsplit("/", 1)
+    authenticated_source_url = inject_basic_auth_into_url(
+        client.project_git_url(source_project_path),
+        client.username,
+        client.token,
+        "internal source import url",
+    )
     payload = {
-        "branches": source_default_branch,
+        "import_url": authenticated_source_url,
         "name": project_name,
         "namespace_id": get_gitlab_group_id(client, group_path),
         "path": project_name,
+        "shared_runners_enabled": False,
         "visibility": "private",
     }
 
     try:
-        created = gitlab_request(client, "POST", f"/projects/{source_project_id}/fork", payload)
+        created = gitlab_request(client, "POST", "/projects", payload)
     except ApiError as exc:
         message = str(exc).lower()
         if exc.status in {400, 409} and (
@@ -470,7 +473,7 @@ def _bootstrap_internal_target_project(
         ) from exc
 
     if created is not None and not isinstance(created, dict):
-        raise SystemExit("GitLab fork create returned an invalid response")
+        raise SystemExit("GitLab project create returned an invalid response")
     return _wait_for_project_import(client, target_project_path, timeout_seconds=timeout_seconds), True
 
 
@@ -960,7 +963,6 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
                 client,
                 source_project_path=target.source,
                 target_project_path=target.target_project_path,
-                source_default_branch=source_default_branch,
                 timeout_seconds=target.git_timeout_seconds,
             )
         else:

@@ -373,7 +373,7 @@ class GlabSyncTests(unittest.TestCase):
         self.assertIn("target-aaaaaaaaaaaa", summary)
         self.assertNotIn("https://gitlab.example/top/demo.git", summary)
 
-    def test_bootstrap_internal_target_project_forks_missing_target_and_waits_for_import(self):
+    def test_bootstrap_internal_target_project_imports_missing_target_and_waits_for_import(self):
         client = GitLabClient(base_url="https://gitlab.example", username="svc", token="token")
         project_states = [
             None,
@@ -394,7 +394,6 @@ class GlabSyncTests(unittest.TestCase):
                             client,
                             source_project_path="kalilinux/demo",
                             target_project_path="glab-forks/team/demo",
-                            source_default_branch="main",
                             timeout_seconds=30,
                         )
 
@@ -404,12 +403,13 @@ class GlabSyncTests(unittest.TestCase):
         request.assert_called_once_with(
             client,
             "POST",
-            "/projects/17/fork",
+            "/projects",
             {
-                "branches": "main",
+                "import_url": "https://svc:token@gitlab.example/kalilinux/demo.git",
                 "name": "demo",
                 "namespace_id": 55,
                 "path": "demo",
+                "shared_runners_enabled": False,
                 "visibility": "private",
             },
         )
@@ -430,7 +430,6 @@ class GlabSyncTests(unittest.TestCase):
                                 client,
                                 source_project_path="kalilinux/demo",
                                 target_project_path="glab-forks/team/demo",
-                                source_default_branch="main",
                                 timeout_seconds=30,
                             )
         self.assertIn("fork failed", str(exc.exception))
@@ -469,7 +468,6 @@ class GlabSyncTests(unittest.TestCase):
             client,
             source_project_path="kalilinux/demo",
             target_project_path="glab-forks/team/demo",
-            source_default_branch="main",
             timeout_seconds=300,
         )
         ensure_project.assert_not_called()

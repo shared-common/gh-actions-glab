@@ -186,6 +186,37 @@ class CommonTests(unittest.TestCase):
             "https://gitlab.com/top/sub/project.git",
         )
 
+    def test_ensure_gitlab_project_disables_shared_runners_on_create(self):
+        client = _common.GitLabClient(
+            base_url="https://gitlab.com",
+            username="svc-user",
+            token="secret-token",
+        )
+        with unittest.mock.patch.object(_common, "get_gitlab_project", return_value=None):
+            with unittest.mock.patch.object(_common, "get_gitlab_group_id", return_value=77):
+                with unittest.mock.patch.object(_common, "find_project_in_group", return_value=None):
+                    with unittest.mock.patch.object(
+                        _common,
+                        "gitlab_request",
+                        return_value={"id": 11, "path_with_namespace": "top/sub/project"},
+                    ) as request:
+                        project, created = _common.ensure_gitlab_project(client, "top/sub/project")
+
+        self.assertTrue(created)
+        self.assertEqual(project["id"], 11)
+        request.assert_called_once_with(
+            client,
+            "POST",
+            "/projects",
+            {
+                "name": "project",
+                "path": "project",
+                "namespace_id": 77,
+                "shared_runners_enabled": False,
+                "visibility": "private",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
