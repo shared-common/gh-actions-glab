@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -43,6 +44,7 @@ class GlabSyncTests(unittest.TestCase):
                         "target_project_path": "ghgl-forks/mainline/keepsecret",
                         "target_mirror_path": "ghgl-mirror/mainline/keepsecret",
                         "source_url": "https://invent.kde.org/utilities/keepsecret",
+                        "git_lfs": True,
                         "branch_rev": "feature/login",
                         "branches": [
                             {"name": "dev/test", "protected": True, "upstream": False},
@@ -61,6 +63,7 @@ class GlabSyncTests(unittest.TestCase):
         self.assertEqual(targets[0].target_project_path, "ghgl-forks/mainline/keepsecret")
         self.assertEqual(targets[0].target_mirror_path, "ghgl-mirror/mainline/keepsecret")
         self.assertEqual(targets[0].source, "https://invent.kde.org/utilities/keepsecret")
+        self.assertTrue(targets[0].git_lfs)
         self.assertEqual(targets[0].branch_rev, "feature/login")
         self.assertEqual(targets[0].branches[0].name, "dev/test")
         self.assertEqual(targets[0].tags[0].name, "v1.0.0")
@@ -74,6 +77,7 @@ class GlabSyncTests(unittest.TestCase):
                         "target_project_path": "glab-forks/system/yodl",
                         "target_mirror_path": "",
                         "source_project_path": "fbb-git/yodl",
+                        "git_lfs": False,
                         "branch_rev": "",
                         "branches": [],
                         "tags": [],
@@ -88,6 +92,7 @@ class GlabSyncTests(unittest.TestCase):
         self.assertEqual(targets[0].target_project_path, "glab-forks/system/yodl")
         self.assertEqual(targets[0].target_mirror_path, "")
         self.assertEqual(targets[0].source, "fbb-git/yodl")
+        self.assertFalse(targets[0].git_lfs)
 
     def test_load_targets_rejects_empty_target_list(self):
         path = write_config({"version": 1, "targets": []})
@@ -127,6 +132,19 @@ class GlabSyncTests(unittest.TestCase):
             }
         )
         self.assertEqual(target.source, "https://invent.kde.org/utilities/keepsecret")
+
+    def test_target_spec_rejects_non_boolean_git_lfs(self):
+        with self.assertRaisesRegex(SystemExit, "git_lfs must be a boolean when set"):
+            glab_sync.TargetSpec.from_payload(
+                {
+                    "mode": "external",
+                    "target_project_path": "top/sub/demo",
+                    "source": "https://example.com/group/demo.git",
+                    "git_lfs": "true",
+                    "branches": [],
+                    "tags": [],
+                }
+            )
 
     def test_target_spec_rejects_target_mirror_path_with_dot_git_suffix(self):
         with self.assertRaisesRegex(SystemExit, "must not include a .git suffix"):
@@ -358,6 +376,72 @@ class GlabSyncTests(unittest.TestCase):
         with mock.patch.object(glab_sync, "require_secret", side_effect=lambda name: values[name]):
             client = glab_sync.load_mirror_target_client()
         self.assertEqual((client.username, client.token), ("mirror-user", "mirror-token"))
+
+    def test_ref_declares_git_lfs_detects_gitattributes_rule(self):
+        run_results = [
+            subprocess.CompletedProcess(["git"], 0, ".gitattributes\n", ""),
+            subprocess.CompletedProcess(["git"], 0, "*.img filter=lfs diff=lfs merge=lfs -text\n", ""),
+        ]
+        with mock.patch.object(glab_sync, "run_command", side_effect=run_results):
+            self.assertTrue(
+                glab_sync._ref_declares_git_lfs(
+                    "/tmp/repo.git",
+                    "refs/heads/main",
+                    secrets=(),
+                    env_overrides=None,
+                )
+            )
+
+    def test_push_ref_skips_lfs_commands_when_disabled(self):
+        push_envs: list[dict[str, str]] = []
+
+        def fake_push(command, **kwargs):
+            push_envs.append(kwargs["env"])
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch.object(glab_sync, "run_command") as run_command:
+            with mock.patch("subprocess.run", side_effect=fake_push):
+                outcome = glab_sync._push_ref(
+                    "/tmp/repo.git",
+                    "https://example.com/source.git",
+                    "https://example.com/target.git",
+                    "main",
+                    "gitlab/mcr/main",
+                    ref_namespace="heads",
+                    source_remote="source",
+                    target_remote="target",
+                    expected_remote_sha=None,
+                )
+        self.assertEqual(outcome, "updated")
+        run_command.assert_not_called()
+        self.assertNotIn("GIT_LFS_SKIP_PUSH", push_envs[0])
+
+    def test_push_ref_runs_lfs_commands_and_skips_pre_push_hook_when_enabled(self):
+        push_envs: list[dict[str, str]] = []
+
+        def fake_push(command, **kwargs):
+            push_envs.append(kwargs["env"])
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch.object(glab_sync, "run_command") as run_command:
+            with mock.patch("subprocess.run", side_effect=fake_push):
+                outcome = glab_sync._push_ref(
+                    "/tmp/repo.git",
+                    "https://example.com/source.git",
+                    "https://example.com/target.git",
+                    "main",
+                    "gitlab/mcr/main",
+                    ref_namespace="heads",
+                    source_remote="source",
+                    target_remote="target",
+                    expected_remote_sha=None,
+                    git_lfs_enabled=True,
+                )
+        self.assertEqual(outcome, "updated")
+        self.assertEqual(run_command.call_count, 2)
+        self.assertEqual(run_command.call_args_list[0].args[0][3:5], ["lfs", "fetch"])
+        self.assertEqual(run_command.call_args_list[1].args[0][3:5], ["lfs", "push"])
+        self.assertEqual(push_envs[0]["GIT_LFS_SKIP_PUSH"], "1")
 
 
 if __name__ == "__main__":

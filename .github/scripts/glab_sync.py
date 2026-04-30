@@ -68,6 +68,7 @@ class TargetSpec:
     source: str
     repo_name: str
     target_mirror_path: str = ""
+    git_lfs: bool | None = None
     branches: tuple[NamedSyncSpec, ...] = ()
     tags: tuple[NamedSyncSpec, ...] = ()
     branch_rev: str = ""
@@ -79,6 +80,7 @@ class TargetSpec:
             "target_mirror_path": self.target_mirror_path,
             "source": self.source,
             "repo_name": self.repo_name,
+            "git_lfs": self.git_lfs,
             "branch_rev": self.branch_rev,
             "branches": [item.__dict__ for item in self.branches],
             "tags": [item.__dict__ for item in self.tags],
@@ -91,6 +93,7 @@ class TargetSpec:
         target_mirror_path = str(payload.get("target_mirror_path") or "").strip()
         source = _require_string(payload.get("source"), "source")
         repo_name_raw = str(payload.get("repo_name") or "").strip()
+        git_lfs = _require_optional_bool(payload.get("git_lfs"), "git_lfs")
         branch_rev = str(payload.get("branch_rev") or "").strip()
         if mode not in {"external", "internal"}:
             raise SystemExit(f"Unsupported sync mode: {mode}")
@@ -126,6 +129,7 @@ class TargetSpec:
             target_mirror_path=target_mirror_path,
             source=normalized_source,
             repo_name=repo_name,
+            git_lfs=git_lfs,
             branches=tuple(branches),
             tags=tuple(tags),
             branch_rev=branch_rev,
@@ -216,6 +220,14 @@ def _require_string(value: object, label: str) -> str:
 def _require_dict(value: object, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise SystemExit(f"{label} must be an object")
+    return value
+
+
+def _require_optional_bool(value: object, label: str) -> bool | None:
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise SystemExit(f"{label} must be a boolean when set")
     return value
 
 
@@ -332,6 +344,7 @@ def load_targets(mode: str, *, path: str | None = None) -> list[TargetSpec]:
                 entry.get(source_key),
                 f"{label}.targets[{index}].{source_key}",
             ),
+            "git_lfs": entry.get("git_lfs"),
             "branch_rev": str(entry.get("branch_rev") or "").strip(),
             "branches": entry.get("branches", []),
             "tags": entry.get("tags", []),
@@ -536,6 +549,60 @@ def _fetch_source_ref(
     )
 
 
+def _ref_declares_git_lfs(
+    repo_path: str,
+    ref_name: str,
+    *,
+    secrets: tuple[str, ...],
+    env_overrides: dict[str, str] | None,
+) -> bool:
+    proc = run_command(
+        ["git", "-C", repo_path, "ls-tree", "-r", "--name-only", ref_name],
+        secrets=secrets,
+        timeout=300,
+        env_overrides=env_overrides,
+    )
+    candidate_paths = [
+        path
+        for path in (line.strip() for line in proc.stdout.splitlines())
+        if path == ".gitattributes"
+        or path.endswith("/.gitattributes")
+        or path == ".lfsconfig"
+        or path.endswith("/.lfsconfig")
+    ]
+    for path in candidate_paths:
+        contents = run_command(
+            ["git", "-C", repo_path, "show", f"{ref_name}:{path}"],
+            secrets=secrets,
+            timeout=300,
+            env_overrides=env_overrides,
+        ).stdout
+        if "filter=lfs" in contents or "lfs.url" in contents or "lfs.pushurl" in contents:
+            return True
+    return False
+
+
+def _target_uses_git_lfs(
+    target: TargetSpec,
+    repo_path: str,
+    fetched_refs: tuple[str, ...],
+    *,
+    secrets: tuple[str, ...],
+    env_overrides: dict[str, str] | None,
+) -> bool:
+    if target.git_lfs is not None:
+        return target.git_lfs
+    for ref_name in fetched_refs:
+        if _ref_declares_git_lfs(
+            repo_path,
+            ref_name,
+            secrets=secrets,
+            env_overrides=env_overrides,
+        ):
+            return True
+    return False
+
+
 def _push_ref(
     repo_path: str,
     source_url: str,
@@ -548,6 +615,7 @@ def _push_ref(
     target_remote: str,
     expected_remote_sha: str | None,
     allow_existing: bool = False,
+    git_lfs_enabled: bool = False,
     secrets: tuple[str, ...] = (),
     env_overrides: dict[str, str] | None = None,
 ) -> str:
@@ -570,18 +638,19 @@ def _push_ref(
 
     source_refspec = f"refs/{ref_namespace}/{source_ref}"
     target_refspec = f"refs/{ref_namespace}/{target_ref}"
-    run_command(
-        ["git", "-C", repo_path, "lfs", "fetch", source_remote, source_refspec],
-        secrets=secrets,
-        timeout=300,
-        env_overrides=env_overrides,
-    )
-    run_command(
-        ["git", "-C", repo_path, "lfs", "push", target_remote, source_refspec],
-        secrets=secrets,
-        timeout=300,
-        env_overrides=env_overrides,
-    )
+    if git_lfs_enabled:
+        run_command(
+            ["git", "-C", repo_path, "lfs", "fetch", source_remote, source_refspec],
+            secrets=secrets,
+            timeout=300,
+            env_overrides=env_overrides,
+        )
+        run_command(
+            ["git", "-C", repo_path, "lfs", "push", target_remote, source_refspec],
+            secrets=secrets,
+            timeout=300,
+            env_overrides=env_overrides,
+        )
 
     command = [
         "git",
@@ -595,6 +664,8 @@ def _push_ref(
     env["GIT_TERMINAL_PROMPT"] = "0"
     if env_overrides:
         env.update(env_overrides)
+    if git_lfs_enabled:
+        env["GIT_LFS_SKIP_PUSH"] = "1"
     push_proc = run_push(command, env)
     if push_proc.returncode == 0:
         return "updated"
@@ -634,6 +705,7 @@ def _sync_branch(
     client: GitLabClient,
     existing_sha: str | None,
     source_sha: str | None,
+    git_lfs_enabled: bool,
     secrets: tuple[str, ...],
     git_env: dict[str, str],
     results: dict[str, list[str]],
@@ -662,6 +734,7 @@ def _sync_branch(
             target_remote="target",
             expected_remote_sha=None,
             allow_existing=True,
+            git_lfs_enabled=git_lfs_enabled,
             secrets=secrets,
             env_overrides=git_env,
         )
@@ -680,6 +753,7 @@ def _sync_branch(
                 source_remote="source",
                 target_remote="target",
                 expected_remote_sha=existing_sha,
+                git_lfs_enabled=git_lfs_enabled,
                 secrets=secrets,
                 env_overrides=git_env,
             )
@@ -705,6 +779,7 @@ def _sync_tag(
     client: GitLabClient,
     existing_sha: str | None,
     source_sha: str | None,
+    git_lfs_enabled: bool,
     secrets: tuple[str, ...],
     git_env: dict[str, str],
     results: dict[str, list[str]],
@@ -733,6 +808,7 @@ def _sync_tag(
             target_remote="target",
             expected_remote_sha=None,
             allow_existing=True,
+            git_lfs_enabled=git_lfs_enabled,
             secrets=secrets,
             env_overrides=git_env,
         )
@@ -751,6 +827,7 @@ def _sync_tag(
                 source_remote="source",
                 target_remote="target",
                 expected_remote_sha=existing_sha,
+                git_lfs_enabled=git_lfs_enabled,
                 secrets=secrets,
                 env_overrides=git_env,
             )
@@ -846,13 +923,6 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
                 timeout=120,
                 env_overrides=git_env,
             )
-            run_command(
-                ["git", "-C", repo_path, "lfs", "install", "--local"],
-                secrets=secrets,
-                timeout=120,
-                env_overrides=git_env,
-            )
-
             fetched_branch_sources: set[str] = set()
             fetched_tag_sources: set[str] = set()
 
@@ -872,19 +942,6 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
                         env_overrides=source_env,
                     )
                     fetched_branch_sources.add(branch.source_name)
-                _sync_branch(
-                    branch,
-                    repo_path=repo_path,
-                    source_url=source_url,
-                    target_url=target_url,
-                    project_id=project_id,
-                    client=client,
-                    existing_sha=branch_existing[branch.target_name],
-                    source_sha=branch_source.get(branch.source_name),
-                    secrets=secrets,
-                    git_env=git_env,
-                    results=results,
-                )
 
             for tag in tags:
                 needs_source = tag.upstream or tag_existing[tag.target_name] is None
@@ -902,6 +959,44 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
                         env_overrides=source_env,
                     )
                     fetched_tag_sources.add(tag.source_name)
+            fetched_refs = tuple(
+                sorted(
+                    [f"refs/heads/{name}" for name in fetched_branch_sources]
+                    + [f"refs/tags/{name}" for name in fetched_tag_sources]
+                )
+            )
+            git_lfs_enabled = _target_uses_git_lfs(
+                target,
+                repo_path,
+                fetched_refs,
+                secrets=secrets,
+                env_overrides=git_env,
+            )
+            if git_lfs_enabled:
+                run_command(
+                    ["git", "-C", repo_path, "lfs", "install", "--local"],
+                    secrets=secrets,
+                    timeout=120,
+                    env_overrides=git_env,
+                )
+
+            for branch in branches:
+                _sync_branch(
+                    branch,
+                    repo_path=repo_path,
+                    source_url=source_url,
+                    target_url=target_url,
+                    project_id=project_id,
+                    client=client,
+                    existing_sha=branch_existing[branch.target_name],
+                    source_sha=branch_source.get(branch.source_name),
+                    git_lfs_enabled=git_lfs_enabled,
+                    secrets=secrets,
+                    git_env=git_env,
+                    results=results,
+                )
+
+            for tag in tags:
                 _sync_tag(
                     tag,
                     repo_path=repo_path,
@@ -911,6 +1006,7 @@ def reconcile_target(target: TargetSpec, policy: BranchPolicy, client: GitLabCli
                     client=client,
                     existing_sha=tag_existing[tag.target_name],
                     source_sha=tag_source.get(tag.source_name),
+                    git_lfs_enabled=git_lfs_enabled,
                     secrets=secrets,
                     git_env=git_env,
                     results=results,

@@ -101,6 +101,7 @@ Both config files use the same top-level structure:
     {
       "target_project_path": "ghgl-forks/mainline/keepsecret",
       "source_url": "https://invent.kde.org/utilities/keepsecret",
+      "git_lfs": true,
       "branch_rev": "",
       "branches": [],
       "tags": []
@@ -129,6 +130,7 @@ Internal entries use `source_project_path` and resolve them against
     {
       "target_project_path": "glab-forks/system/yodl",
       "source_project_path": "fbb-git/yodl",
+      "git_lfs": false,
       "branch_rev": "",
       "branches": [],
       "tags": []
@@ -141,6 +143,9 @@ Every target entry supports:
 
 - `target_project_path`: full target project path on `GL_BASE_URL`
 - `source_url` or `source_project_path`: source project location for that mode
+- `git_lfs`: optional boolean override; when omitted the workflow inspects the
+  fetched source refs and enables Git LFS only when the target declares LFS
+  usage in `.gitattributes` or `.lfsconfig`
 - `branch_rev`: optional source branch name that syncs into
   `gitlab/<prefix>/<rev>`
 - `branches`: optional array of objects with `name`, `protected`, and
